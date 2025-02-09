@@ -3,7 +3,7 @@
 ## Python:
 - FFT radix 2, 3, 5 (float)
 - Digit inversion permutation of inputs/outputs
-- FFT radix 2 (fixed-point)
+- FFT radix 2, 3, 5 (fixed-point)
 - SQNR evaluation
 
 ## Goals:
