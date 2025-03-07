@@ -6,6 +6,6 @@
 - FFT radix 2, 3, 5 (fixed-point)
 - SQNR evaluation
 
-## Goals:
-- Fixed-point modification of all of the software models
+## To-do:
 - Test the performance
+- Hardware implementation (fixed and reconfigurable architectures)
