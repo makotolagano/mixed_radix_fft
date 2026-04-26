@@ -11,7 +11,7 @@ def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12'):
     stages_fp = []
     stages_fxp = []
 
-    for idx, size in enumerate(stage_sizes):
+    for size in stage_sizes:
         if config == 5:
             delay = size // 5
         elif config == 3:
@@ -22,7 +22,7 @@ def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12'):
         stages_fp.append(
             MixedRadix_SDF_stage_counter_ctrl(
                 config=config,
-                stage_index=idx,
+                stage_index=0,
                 size=size,
                 cfg_delay=delay,
             )
@@ -30,7 +30,7 @@ def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12'):
         stages_fxp.append(
             MixedRadix_SDF_stage_counter_ctrl_FXP(
                 config=config,
-                stage_index=idx,
+                stage_index=0,
                 size=size,
                 cfg_delay=delay,
                 dtype=dtype,
@@ -120,8 +120,8 @@ if __name__ == '__main__':
     report_case(
         name='Radix-3 chain (9 = 3x3)',
         config=3,
-        stage_sizes=[9, 3],
-        stage_radices=[3, 3],
-        N=9,
+        stage_sizes=[27, 9, 3],
+        stage_radices=[3, 3, 3],
+        N=27,
         dtype=args.dtype,
     )
