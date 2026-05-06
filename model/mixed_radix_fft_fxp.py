@@ -1,18 +1,38 @@
+import re
+
 import numpy as np
 from fxpmath import Fxp
 from utils import Fifo
 
 
 class _Quantizer:
-    def __init__(self, dtype='fxp-s32/12'):
+    def __init__(self, dtype='fxp-s32/12', internal_growth_bits=4):
         self.DATA = Fxp(None, True, dtype=dtype)
         self.DATA.config.rounding = 'around'
+        self.DATA_WIDE = Fxp(None, True, dtype=self._grow_dtype(dtype, internal_growth_bits))
+        self.DATA_WIDE.config.rounding = 'around'
+
+    @staticmethod
+    def _grow_dtype(dtype, internal_growth_bits):
+        match = re.fullmatch(r'fxp-s(\d+)/(\d+)', str(dtype))
+        if match is None:
+            return dtype
+
+        total_bits = int(match.group(1)) + int(internal_growth_bits)
+        frac_bits = int(match.group(2)) + int(internal_growth_bits)
+        return f'fxp-s{total_bits}/{frac_bits}'
 
     def q(self, value):
         return float(Fxp(value).like(self.DATA))
 
     def qc(self, value):
         return complex(self.q(np.real(value)), self.q(np.imag(value)))
+
+    def qw(self, value):
+        return float(Fxp(value).like(self.DATA_WIDE))
+
+    def qcw(self, value):
+        return complex(self.qw(np.real(value)), self.qw(np.imag(value)))
 
 
 class MixedRadix_PreAdder_FXP:
@@ -31,27 +51,27 @@ class MixedRadix_PreAdder_FXP:
         self.output_3 = 0.0 + 0.0j
         self.output_4 = 0.0 + 0.0j
 
-        self.k2 = self.qz.q(0.5 * (np.cos(2 * np.pi / 5) - np.cos(4 * np.pi / 5)))
-        self.k3 = self.qz.qc(1j * (np.sin(4 * np.pi / 5) - np.sin(2 * np.pi / 5)))
-        self.k4 = self.qz.qc(-1j * np.sin(4 * np.pi / 5))
-        self.k5 = self.qz.qc(1j * (np.sin(4 * np.pi / 5) + np.sin(2 * np.pi / 5)))
-        self.k6 = self.qz.q(-np.sqrt(3) / 2)
+        self.k2 = self.qz.qw(0.5 * (np.cos(2 * np.pi / 5) - np.cos(4 * np.pi / 5)))
+        self.k3 = self.qz.qcw(1j * (np.sin(4 * np.pi / 5) - np.sin(2 * np.pi / 5)))
+        self.k4 = self.qz.qcw(-1j * np.sin(4 * np.pi / 5))
+        self.k5 = self.qz.qcw(1j * (np.sin(4 * np.pi / 5) + np.sin(2 * np.pi / 5)))
+        self.k6 = self.qz.qw(-np.sqrt(3) / 2)
 
     def calculate(self, s0, s1):
-        tmp_0_0 = self.qz.qc(self.input_0)
-        tmp_1_0 = self.input_1 + self.input_4
-        tmp_2_0 = self.input_2 + self.input_3
-        tmp_3_0 = self.input_1 - self.input_4
-        tmp_4_0 = self.input_2 - self.input_3
+        tmp_0_0 = self.qz.qcw(self.input_0)
+        tmp_1_0 = self.qz.qcw(self.input_1 + self.input_4)
+        tmp_2_0 = self.qz.qcw(self.input_2 + self.input_3)
+        tmp_3_0 = self.qz.qcw(self.input_1 - self.input_4)
+        tmp_4_0 = self.qz.qcw(self.input_2 - self.input_3)
 
         tmp_0_1 = tmp_0_0
-        tmp_1_1 = tmp_1_0 + tmp_2_0
-        tmp_2_1 = tmp_1_0 - tmp_2_0
+        tmp_1_1 = self.qz.qcw(tmp_1_0 + tmp_2_0)
+        tmp_2_1 = self.qz.qcw(tmp_1_0 - tmp_2_0)
         tmp_3_1 = tmp_3_0
         tmp_4_1 = tmp_4_0
-        tmp_5_1 = tmp_3_0 + tmp_4_0
+        tmp_5_1 = self.qz.qcw(tmp_3_0 + tmp_4_0)
 
-        tmp_0_2 = tmp_0_1 + tmp_1_1
+        tmp_0_2 = self.qz.qcw(tmp_0_1 + tmp_1_1)
 
         if s0 == 0:
             mul_0 = -1.0
@@ -59,28 +79,28 @@ class MixedRadix_PreAdder_FXP:
             mul_0 = -0.5
         else:
             mul_0 = -0.25
-        mul_0 = self.qz.q(mul_0)
+        mul_0 = self.qz.qw(mul_0)
 
-        tmp_1_2 = tmp_0_1 + (tmp_1_1 * mul_0)
+        tmp_1_2 = self.qz.qcw(tmp_0_1 + self.qz.qcw(tmp_1_1 * mul_0))
 
         mul_1 = self.k6 if (s1 == 0) else self.k2
-        mul_1_res = tmp_2_1 * mul_1
+        mul_1_res = self.qz.qcw(tmp_2_1 * mul_1)
 
         if s1 == 1:
             tmp_2_2 = mul_1_res
         else:
-            tmp_2_2 = mul_1_res * 1j
+            tmp_2_2 = self.qz.qcw(mul_1_res * 1j)
 
-        tmp_3_2 = tmp_3_1 * self.k3
-        tmp_4_2 = tmp_4_1 * self.k5
-        tmp_5_2 = tmp_5_1 * self.k4
+        tmp_3_2 = self.qz.qcw(tmp_3_1 * self.k3)
+        tmp_4_2 = self.qz.qcw(tmp_4_1 * self.k5)
+        tmp_5_2 = self.qz.qcw(tmp_5_1 * self.k4)
 
         tmp_0_3 = tmp_0_2
         tmp_5_3 = tmp_1_2
-        tmp_1_3 = tmp_1_2 + tmp_2_2
-        tmp_2_3 = tmp_1_2 - tmp_2_2
-        tmp_3_3 = tmp_3_2 + tmp_5_2
-        tmp_4_3 = tmp_4_2 + tmp_5_2
+        tmp_1_3 = self.qz.qcw(tmp_1_2 + tmp_2_2)
+        tmp_2_3 = self.qz.qcw(tmp_1_2 - tmp_2_2)
+        tmp_3_3 = self.qz.qcw(tmp_3_2 + tmp_5_2)
+        tmp_4_3 = self.qz.qcw(tmp_4_2 + tmp_5_2)
 
         self.output_0 = self.qz.qc(tmp_0_3)
 

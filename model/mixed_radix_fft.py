@@ -102,36 +102,52 @@ class MixedRadix_PreAdder:
 # radix 3 rotator
 class MixedRadix_Rotator:
     cnt = 0
-    def __init__(self, stage_index, size):
+    def __init__(self, config, stage_index, size):
+        if int(config) not in [2, 3, 5]:
+            raise ValueError("config must be 2, 3 or 5")
+
+        self.config = int(config)
         self.input = 0.0
         self.output = 0.0
         self.stage_index = stage_index
-        # self.twiddleROM = (np.ones(3**(num_of_stages-stage_index))).astype(complex)
-        self.twiddleROM = (np.ones(size)).astype(complex)
-        # self.two_thirds_len = 3**(num_of_stages-stage_index) - (3**(num_of_stages-stage_index)//3)
-        self.two_thirds_len = size - size//3
-        # print(self.two_thirds_len)
-        # N = 3**num_of_stages
-        N = size
-        if (self.two_thirds_len > 2):
-            for i in range(self.two_thirds_len):
-                if (i < self.two_thirds_len//2):
-                    k = i * 3**(stage_index)
-                else:
-                    k = 2*(i-self.two_thirds_len//2) * 3**(stage_index)
-                # print("k = ", k)
-                self.twiddleROM[i+(len(self.twiddleROM) - self.two_thirds_len)] = np.exp(-1j*2*np.pi*k/N)
-        
-        print(f"STAGE RADIX3, twiddle = {self.twiddleROM}")
+        self.size = size
 
-        # print(self.twiddleROM)
+        self.twiddleROM = np.ones(self.size).astype(complex)
+        N = self.size
+
+        if self.config == 2:
+            active_len = self.size // 2
+            if active_len > 1:
+                for i in range(active_len):
+                    k = i * 2 ** self.stage_index
+                    self.twiddleROM[i + (self.size - active_len)] = np.exp(-1j * 2 * np.pi * k / N)
+        elif self.config == 3:
+            active_len = self.size - self.size // 3
+            if active_len > 2:
+                for i in range(active_len):
+                    if i < active_len // 2:
+                        k = i * 3 ** self.stage_index
+                    else:
+                        k = 2 * (i - active_len // 2) * 3 ** self.stage_index
+                    self.twiddleROM[i + (self.size - active_len)] = np.exp(-1j * 2 * np.pi * k / N)
+        else:
+            active_len = self.size - self.size // 5
+            if active_len > 4:
+                for i in range(active_len):
+                    if i < active_len // 4:
+                        k = i * 5 ** self.stage_index
+                    elif i < active_len // 2:
+                        k = 2 * (i - active_len // 4) * 5 ** self.stage_index
+                    elif i < 3 * active_len // 4:
+                        k = 3 * (i - 2 * active_len // 4) * 5 ** self.stage_index
+                    else:
+                        k = 4 * (i - 3 * active_len // 4) * 5 ** self.stage_index
+                    self.twiddleROM[i + (self.size - active_len)] = np.exp(-1j * 2 * np.pi * k / N)
 
     def rotate(self, fifo_full_flag):
-        if (fifo_full_flag): # dozvola da brojac vrti i cita redom twiddle faktore iz memorije
-            # print(f"STAGE {self.stage_index}, FIFO FULL")
+        if fifo_full_flag:
             self.output = self.input * self.twiddleROM[self.cnt]
-            # print(f'STAGE {self.stage_index}, curr twiddle = {self.twiddleROM[self.cnt]}')
-            if (self.cnt == len(self.twiddleROM)-1):
+            if self.cnt == len(self.twiddleROM) - 1:
                 self.cnt = 0
             else:
                 self.cnt += 1
@@ -203,7 +219,7 @@ class MixedRadix_SDF_stage_counter_ctrl:
         self.fifo_3 = Fifo(self.cfg_delay)
 
         self.pre_adder = MixedRadix_PreAdder()
-        self.rotator = MixedRadix_Rotator(stage_index=self.stage_index, size=self.num_of_samples)
+        self.rotator = MixedRadix_Rotator(config=self.config, stage_index=self.stage_index, size=self.num_of_samples)
         self.rot_en = 0
 
         self.ctrl = Radix5PhaseController(cfg=self.config, cfg_delay=self.cfg_delay)
