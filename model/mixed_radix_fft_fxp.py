@@ -6,11 +6,13 @@ from utils import Fifo
 
 
 class _Quantizer:
-    def __init__(self, dtype='fxp-s32/12', internal_growth_bits=4):
+    def __init__(self, dtype='fxp-s32/12', internal_growth_bits=4, overflow='saturate'):
         self.DATA = Fxp(None, True, dtype=dtype)
         self.DATA.config.rounding = 'around'
+        self.DATA.config.overflow = overflow
         self.DATA_WIDE = Fxp(None, True, dtype=self._grow_dtype(dtype, internal_growth_bits))
         self.DATA_WIDE.config.rounding = 'around'
+        self.DATA_WIDE.config.overflow = overflow
 
     @staticmethod
     def _grow_dtype(dtype, internal_growth_bits):
@@ -34,10 +36,21 @@ class _Quantizer:
     def qcw(self, value):
         return complex(self.qw(np.real(value)), self.qw(np.imag(value)))
 
+    def q_shifted(self, value, bits):
+        if bits == 0:
+            return self.q(value)
+        return self.q(value / (2 ** bits))
+
+    def qcw_shifted(self, value, bits):
+        if bits == 0:
+            return self.qcw(value)
+        return complex(self.q_shifted(np.real(value), bits), self.q_shifted(np.imag(value), bits))
+
 
 class MixedRadix_PreAdder_FXP:
-    def __init__(self, dtype='fxp-s32/12'):
-        self.qz = _Quantizer(dtype=dtype)
+    def __init__(self, dtype='fxp-s32/12', shift_bits=0, overflow='saturate'):
+        self.qz = _Quantizer(dtype=dtype, overflow=overflow)
+        self.shift_bits = int(shift_bits)
 
         self.input_0 = 0.0 + 0.0j
         self.input_1 = 0.0 + 0.0j
@@ -102,35 +115,41 @@ class MixedRadix_PreAdder_FXP:
         tmp_3_3 = self.qz.qcw(tmp_3_2 + tmp_5_2)
         tmp_4_3 = self.qz.qcw(tmp_4_2 + tmp_5_2)
 
-        self.output_0 = self.qz.qc(tmp_0_3)
+        # apply optional right-shift scaling before final rounding/quantization
+        self.output_0 = self.qz.qc(tmp_0_3 / (2 ** self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_0_3)
 
         tmp_out_1_radix5 = tmp_1_3 + tmp_3_3
         tmp_out_1_radix3 = tmp_1_3
         tmp_out_1_radix2 = tmp_5_3
 
         if s0 == 0:
-            self.output_1 = self.qz.qc(tmp_out_1_radix2)
+            self.output_1 = self.qz.qc(tmp_out_1_radix2 / (2 ** self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_out_1_radix2)
         elif s0 == 1:
-            self.output_1 = self.qz.qc(tmp_out_1_radix3)
+            self.output_1 = self.qz.qc(tmp_out_1_radix3 / (2 ** self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_out_1_radix3)
         else:
-            self.output_1 = self.qz.qc(tmp_out_1_radix5)
+            self.output_1 = self.qz.qc(tmp_out_1_radix5 / (2 ** self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_out_1_radix5)
 
         tmp_out_2_radix5 = tmp_2_3 + tmp_4_3
         tmp_out_2_radix3 = tmp_2_3
-        self.output_2 = self.qz.qc(tmp_out_2_radix3 if (s1 == 0) else tmp_out_2_radix5)
+        out2_val = tmp_out_2_radix3 if (s1 == 0) else tmp_out_2_radix5
+        self.output_2 = self.qz.qc(out2_val / (2 ** self.shift_bits)) if self.shift_bits else self.qz.qc(out2_val)
 
-        self.output_4 = self.qz.qc(tmp_1_3 - tmp_3_3)
-        self.output_3 = self.qz.qc(tmp_2_3 - tmp_4_3)
+        self.output_4 = self.qz.qc((tmp_1_3 - tmp_3_3) / (2 ** self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_1_3 - tmp_3_3)
+        self.output_3 = self.qz.qc((tmp_2_3 - tmp_4_3) / (2 ** self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_2_3 - tmp_4_3)
 
 
 class MixedRadix_Rotator_FXP:
     cnt = 0
 
-    def __init__(self, config, stage_index, size, dtype='fxp-s32/12'):
+    def __init__(self, config, stage_index, size, dtype='fxp-s32/12', overflow='saturate', twiddle_dtype=None):
         if int(config) not in [2, 3, 5]:
             raise ValueError('config must be 2, 3 or 5')
 
-        self.qz = _Quantizer(dtype=dtype)
+        self.qz = _Quantizer(dtype=dtype, overflow=overflow)
+        # Separate quantizer for twiddle factors; defaults to same as data if not specified
+        if twiddle_dtype is None:
+            twiddle_dtype = dtype
+        self.qz_twiddle = _Quantizer(dtype=twiddle_dtype, overflow=overflow)
         self.config = int(config)
         self.stage_index = int(stage_index)
         self.size = int(size)
@@ -169,7 +188,7 @@ class MixedRadix_Rotator_FXP:
                         k = 4 * (i - 3 * active_len // 4) * 5 ** self.stage_index
                     self.twiddleROM[i + (self.size - active_len)] = np.exp(-1j * 2 * np.pi * k / N)
 
-        self.twiddleROM = np.array([self.qz.qc(x) for x in self.twiddleROM], dtype=complex)
+        self.twiddleROM = np.array([self.qz_twiddle.qc(x) for x in self.twiddleROM], dtype=complex)
 
     def rotate(self, fifo_full_flag):
         if fifo_full_flag:
@@ -204,11 +223,11 @@ class RadixPhaseController:
 
 
 class MixedRadix_SDF_stage_counter_ctrl_FXP:
-    def __init__(self, config, stage_index, size, cfg_delay=None, s0=2, s1=1, dtype='fxp-s32/12'):
+    def __init__(self, config, stage_index, size, cfg_delay=None, s0=2, s1=1, dtype='fxp-s32/12', preadder_shift_bits=None, overflow='saturate', twiddle_dtype=None):
         if int(config) not in [2, 3, 5]:
             raise ValueError('This implementation is for radix-2-3-5 stages (config=5 or 3 or 2)')
 
-        self.qz = _Quantizer(dtype=dtype)
+        self.qz = _Quantizer(dtype=dtype, overflow=overflow)
         self.config = int(config)
         self.stage_index = int(stage_index)
         self.num_of_samples = int(size)
@@ -234,8 +253,16 @@ class MixedRadix_SDF_stage_counter_ctrl_FXP:
         self.fifo_2 = Fifo(self.cfg_delay)
         self.fifo_3 = Fifo(self.cfg_delay)
 
-        self.pre_adder = MixedRadix_PreAdder_FXP(dtype=dtype)
-        self.rotator = MixedRadix_Rotator_FXP(config=self.config, stage_index=self.stage_index, size=self.num_of_samples, dtype=dtype)
+        if preadder_shift_bits is None:
+            if self.config == 2:
+                preadder_shift_bits = 1
+            elif self.config == 3:
+                preadder_shift_bits = 2
+            else:
+                preadder_shift_bits = 3
+
+        self.pre_adder = MixedRadix_PreAdder_FXP(dtype=dtype, shift_bits=preadder_shift_bits, overflow=overflow)
+        self.rotator = MixedRadix_Rotator_FXP(config=self.config, stage_index=self.stage_index, size=self.num_of_samples, dtype=dtype, overflow=overflow, twiddle_dtype=twiddle_dtype)
 
         self.ctrl = RadixPhaseController(cfg=self.config, cfg_delay=self.cfg_delay)
 
@@ -334,3 +361,23 @@ class MixedRadix_SDF_stage_counter_ctrl_FXP:
             self.op_cnt += 1
 
         return self.output_sample
+
+
+class MixedRadix_FinalScaler_FXP:
+    def __init__(self, size, total_shift=0, dtype='fxp-s32/12', internal_growth_bits=4, overflow='saturate'):
+        self.size = int(size)
+        self.total_shift = int(total_shift)
+        self.qz = _Quantizer(dtype=dtype, internal_growth_bits=internal_growth_bits, overflow=overflow)
+        self.input = 0.0 + 0.0j
+        self.output = 0.0 + 0.0j
+
+        if self.size < 1:
+            raise ValueError('size must be >= 1')
+
+        self.scale = (2 ** self.total_shift) / self.size
+
+    def scale_sample(self, value):
+        self.input = self.qz.qc(value)
+        self.output = self.qz.qc(self.input * self.scale)
+        # print("SCALE = ", self.scale)
+        return self.output

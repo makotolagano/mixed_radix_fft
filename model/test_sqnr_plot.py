@@ -1,11 +1,12 @@
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
 from scipy.fft import fft
 
 from mixed_radix_fft import MixedRadix_SDF_stage_counter_ctrl
-from mixed_radix_fft_fxp import MixedRadix_SDF_stage_counter_ctrl_FXP
+from mixed_radix_fft_fxp import MixedRadix_FinalScaler_FXP, MixedRadix_SDF_stage_counter_ctrl_FXP
 from utils import digit_reverse
 
 try:
@@ -16,7 +17,7 @@ except Exception as exc:
     raise ImportError('matplotlib is required for plotting. Install it in your env.') from exc
 
 
-def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12'):
+def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12', twiddle_dtype=None):
     # allow a single config (int) or a per-stage iterable (list/tuple/ndarray)
     if hasattr(config, '__iter__') and not isinstance(config, (str, bytes)):
         configs = list(config)
@@ -28,14 +29,18 @@ def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12'):
 
     stages_fp = []
     stages_fxp = []
+    total_shift = 0
 
     for cfg, size in zip(configs, stage_sizes):
         if cfg == 5:
             delay = size // 5
+            total_shift += 3
         elif cfg == 3:
             delay = size // 3
+            total_shift += 2
         else:
             delay = size // 2
+            total_shift += 1
 
         stages_fp.append(
             MixedRadix_SDF_stage_counter_ctrl(
@@ -52,11 +57,14 @@ def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12'):
                 size=size,
                 cfg_delay=delay,
                 dtype=dtype,
+                twiddle_dtype=twiddle_dtype,
             )
         )
 
     out_fp = []
     out_fxp = []
+    final_scaler = MixedRadix_FinalScaler_FXP(size=stage_sizes[0], total_shift=total_shift, dtype=dtype)
+    print(f"Scale = {str(2**total_shift/stage_sizes[0])}")
 
     for sample in input_signal:
         val_fp = sample
@@ -67,6 +75,9 @@ def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12'):
 
         for stage in stages_fxp:
             val_fxp = stage.calculate(val_fxp, valid=True)
+
+        val_fp = val_fp / stage_sizes[0]
+        val_fxp = final_scaler.scale_sample(val_fxp)
 
         out_fp.append(val_fp)
         out_fxp.append(val_fxp)
@@ -90,13 +101,13 @@ def sqnr(ref, test):
 
 def generate_signal(kind, n):
     if kind == 'single_tone':
-        k = 20
+        k = 3
         idx = np.arange(n, dtype=float)
-        return 0.9 * np.sin(2 * np.pi * k * idx / n)
+        return np.sqrt(2) * np.exp(2j * np.pi * k * idx / n)
     if kind == 'sine':
         k = max(1, n // 7)
         idx = np.arange(n, dtype=float)
-        return 0.9 * np.sin(2 * np.pi * k * idx / n)
+        return np.sqrt(2) * np.sin(2 * np.pi * k * idx / n)
     if kind == 'ramp':
         return np.arange(n, dtype=float)
     if kind == 'multitone':
@@ -107,6 +118,12 @@ def generate_signal(kind, n):
             sig += np.sin(2 * np.pi * tone * idx / n)
         sig = 0.9 * sig / np.max(np.abs(sig))
         return sig
+    if kind == 'qam16':
+        # Unit-power 16-QAM: I,Q in {-3,-1,+1,+3} scaled by 1/sqrt(10)
+        const_points = np.array([-3, -1, 1, 3], dtype=float) / np.sqrt(10)
+        i_idx = np.random.randint(0, 4, size=n)
+        q_idx = np.random.randint(0, 4, size=n)
+        return const_points[i_idx] + 1j * const_points[q_idx]
     raise ValueError(f'Unsupported signal kind: {kind}')
 
 
@@ -149,39 +166,50 @@ def total_chain_latency(configs, stage_sizes):
     return total
 
 
-def evaluate_case(case_name, config, stage_sizes, stage_radices, dtypes, signal_kind):
+def evaluate_case(case_name, config, stage_sizes, stage_radices, dtypes, twiddle_dtypes, signal_kind):
     n = int(np.prod(stage_radices))
     x = generate_signal(signal_kind, n)
     x_pad = np.append(x, np.zeros(n))
 
-    fp_out, _, _ = run_chain(config=config, stage_sizes=stage_sizes, input_signal=x_pad, dtype=dtypes[0])
+    fp_out, _, _ = run_chain(config=config, stage_sizes=stage_sizes, input_signal=x_pad, dtype=dtypes[0], twiddle_dtype=(twiddle_dtypes[0] if twiddle_dtypes else None))
     latency = total_chain_latency(config, stage_sizes)
     fp_ss = fp_out[latency:latency + n]
     fp_ss = fp_ss[digit_reverse(list(reversed(stage_radices)))]
 
-    np_ref = fft(x)
+    np_ref = fft(x) / n
     # np_ref = np_ref[digit_reverse(stage_radices)]
 
     dtype_results = {}
     summary_rows = []
 
+    if not twiddle_dtypes:
+        twiddle_dtypes = [None]
+
     for dtype in dtypes:
-        _, fxp_out, preadder_widths = run_chain(config=config, stage_sizes=stage_sizes, input_signal=x_pad, dtype=dtype)
-        fxp_ss = fxp_out[latency:latency + n]
-        fxp_ss = fxp_ss[digit_reverse(list(reversed(stage_radices)))]
+        for twiddle_dtype in twiddle_dtypes:
+            _, fxp_out, preadder_widths = run_chain(
+                config=config,
+                stage_sizes=stage_sizes,
+                input_signal=x_pad,
+                dtype=dtype,
+                twiddle_dtype=twiddle_dtype,
+            )
+            fxp_ss = fxp_out[latency:latency + n]
+            fxp_ss = fxp_ss[digit_reverse(list(reversed(stage_radices)))]
 
-        sqnr_fp_vs_fxp = sqnr(fp_ss, fxp_ss)
-        sqnr_np_vs_fxp = sqnr(np_ref, fxp_ss)
-        mse_fp_vs_fxp = np.mean(np.abs(fp_ss - fxp_ss) ** 2)
+            sqnr_fp_vs_fxp = sqnr(fp_ss, fxp_ss)
+            sqnr_np_vs_fxp = sqnr(np_ref, fxp_ss)
+            mse_np_vs_fxp = np.mean(np.abs(np_ref - fxp_ss) ** 2)
 
-        dtype_results[dtype] = {
-            'fft_fxp': fxp_ss,
-            'sqnr_fp_vs_fxp': sqnr_fp_vs_fxp,
-            'sqnr_np_vs_fxp': sqnr_np_vs_fxp,
-            'mse_fp_vs_fxp': mse_fp_vs_fxp,
-            'preadder_widths': preadder_widths,
-        }
-        summary_rows.append((dtype, sqnr_fp_vs_fxp, sqnr_np_vs_fxp, mse_fp_vs_fxp))
+            label = f'{dtype} | twiddle={twiddle_dtype or dtype}'
+            dtype_results[label] = {
+                'fft_fxp': fxp_ss,
+                'sqnr_fp_vs_fxp': sqnr_fp_vs_fxp,
+                'sqnr_np_vs_fxp': sqnr_np_vs_fxp,
+                'mse_np_vs_fxp': mse_np_vs_fxp,
+                'preadder_widths': preadder_widths,
+            }
+            summary_rows.append((label, sqnr_fp_vs_fxp, sqnr_np_vs_fxp, mse_np_vs_fxp))
 
     return {
         'case_name': case_name,
@@ -317,8 +345,8 @@ def parse_args():
     )
     parser.add_argument(
         '--signal',
-        choices=['single_tone', 'ramp', 'sine', 'multitone'],
-        default='single_tone',
+        choices=['single_tone', 'ramp', 'sine', 'multitone', 'qam16'],
+        default='qam16',
         help='Input signal used for FFT test.',
     )
     parser.add_argument(
@@ -326,7 +354,25 @@ def parse_args():
         default='results',
         help='Directory for saved plot images.',
     )
+    parser.add_argument(
+        '--twiddle_dtype',
+        default=None,
+        help='Twiddle factor dtype (e.g. "fxp-s32/24", "fxp-s64/48"). Defaults to --dtypes if not specified.',
+    )
+    parser.add_argument(
+        '--sweep-file',
+        default='sweep_config.json',
+        help='JSON file containing sweep settings for dtypes and twiddle_dtypes.',
+    )
     return parser.parse_args()
+
+
+def _load_sweep_config(path):
+    sweep_path = Path(path)
+    if not sweep_path.exists():
+        return {}
+    with sweep_path.open('r', encoding='utf-8') as f:
+        return json.load(f)
 
 
 def _parse_radices(expr):
@@ -355,16 +401,31 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    sweep_cfg = _load_sweep_config(args.sweep_file)
+    if sweep_cfg:
+        args.n_expr = sweep_cfg.get('n_expr', args.n_expr)
+        args.dtypes = sweep_cfg.get('dtypes', args.dtypes)
+        args.signals = sweep_cfg.get('signals', [sweep_cfg.get('signal', args.signal)])
+        if 'twiddle_dtypes' in sweep_cfg:
+            args.twiddle_dtypes = sweep_cfg.get('twiddle_dtypes')
+        else:
+            args.twiddle_dtypes = [args.twiddle_dtype] if args.twiddle_dtype else [None]
+    else:
+        args.signals = [args.signal]
+        args.twiddle_dtypes = [args.twiddle_dtype] if args.twiddle_dtype else [None]
+
     stage_radices = _parse_radices(args.n_expr)
     stage_sizes = _stage_sizes_from_radices(stage_radices)
 
     cases = [
         {
-            'case_name': f"Mixed-radix chain (N={'*'.join(str(r) for r in stage_radices)})",
+            'case_name': f"Mixed-radix chain (N={'*'.join(str(r) for r in stage_radices)}) | signal={signal_kind}",
             'config': stage_radices,
             'stage_sizes': stage_sizes,
             'stage_radices': stage_radices,
+            'signal_kind': signal_kind,
         }
+        for signal_kind in args.signals
     ]
 
     all_plot_paths = []
@@ -375,7 +436,8 @@ def main():
             stage_sizes=case['stage_sizes'],
             stage_radices=case['stage_radices'],
             dtypes=args.dtypes,
-            signal_kind=args.signal,
+            twiddle_dtypes=args.twiddle_dtypes,
+            signal_kind=case['signal_kind'],
         )
         print_summary_table(result)
         all_plot_paths.extend(save_plots(result, out_dir))

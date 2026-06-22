@@ -3,25 +3,38 @@ import numpy as np
 from scipy.fft import fft
 
 from mixed_radix_fft import MixedRadix_SDF_stage_counter_ctrl
-from mixed_radix_fft_fxp import MixedRadix_SDF_stage_counter_ctrl_FXP
+from mixed_radix_fft_fxp import MixedRadix_FinalScaler_FXP, MixedRadix_SDF_stage_counter_ctrl_FXP
 from utils import digit_reverse
 
 
-def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12'):
+def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12', twiddle_dtype=None):
+    # allow a single config (int) or a per-stage iterable (list/tuple/ndarray)
+    if hasattr(config, '__iter__') and not isinstance(config, (str, bytes)):
+        configs = list(config)
+    else:
+        configs = [config] * len(stage_sizes)
+
+    if len(configs) != len(stage_sizes):
+        raise ValueError('config must be scalar or have same length as stage_sizes')
+
     stages_fp = []
     stages_fxp = []
+    total_shift = 0
 
-    for size in stage_sizes:
-        if config == 5:
+    for cfg, size in zip(configs, stage_sizes):
+        if cfg == 5:
             delay = size // 5
-        elif config == 3:
+            total_shift += 2
+        elif cfg == 3:
             delay = size // 3
+            total_shift += 1
         else:
             delay = size // 2
+            total_shift += 1
 
         stages_fp.append(
             MixedRadix_SDF_stage_counter_ctrl(
-                config=config,
+                config=cfg,
                 stage_index=0,
                 size=size,
                 cfg_delay=delay,
@@ -29,16 +42,18 @@ def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12'):
         )
         stages_fxp.append(
             MixedRadix_SDF_stage_counter_ctrl_FXP(
-                config=config,
+                config=cfg,
                 stage_index=0,
                 size=size,
                 cfg_delay=delay,
                 dtype=dtype,
+                twiddle_dtype=twiddle_dtype,
             )
         )
 
     out_fp = []
     out_fxp = []
+    final_scaler = MixedRadix_FinalScaler_FXP(size=stage_sizes[0], total_shift=total_shift, dtype=dtype)
 
     for sample in input_signal:
         val_fp = sample
@@ -49,6 +64,9 @@ def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12'):
 
         for stage in stages_fxp:
             val_fxp = stage.calculate(val_fxp, valid=True)
+
+        val_fp = val_fp / stage_sizes[0]
+        val_fxp = final_scaler.scale_sample(val_fxp)
 
         out_fp.append(val_fp)
         out_fxp.append(val_fxp)
@@ -85,8 +103,8 @@ def print_result_table(ss_fp, ss_fxp, ref_fft, rows=8):
     print(line)
 
 
-def report_case(name, config, stage_sizes, stage_radices, N, dtype):
-    x = np.arange(N).astype(float)
+def report_case(name, config, stage_sizes, stage_radices, N, dtype, twiddle_dtype=None):
+    x = np.random.rand(N).astype(float)
     x_pad = np.append(x, np.zeros(N))
 
     out_fp, out_fxp = run_chain(
@@ -94,18 +112,20 @@ def report_case(name, config, stage_sizes, stage_radices, N, dtype):
         stage_sizes=stage_sizes,
         input_signal=x_pad,
         dtype=dtype,
+        twiddle_dtype=twiddle_dtype,
     )
 
     ss_fp = out_fp[N - 1:N - 1 + N]
     ss_fxp = out_fxp[N - 1:N - 1 + N]
 
-    ref_fft = fft(x)
+    ref_fft = fft(x) / N
     ref_fft = ref_fft[digit_reverse(stage_radices)]
 
     print(f'\n=== {name} ===')
     print(f'Config={config} | stage_sizes={stage_sizes} | stage_radices={stage_radices} | N={N} | dtype={dtype}')
     print_result_table(ss_fp, ss_fxp, ref_fft, rows=8)
     print(f'SQNR(FP vs FXP): {sqnr(ss_fp, ss_fxp):.2f} dB')
+    print(f'MSE(NumPy vs FXP): {np.mean(np.abs(ref_fft - ss_fxp) ** 2):.6e}')
 
 
 if __name__ == '__main__':
@@ -114,6 +134,11 @@ if __name__ == '__main__':
         '--dtype',
         default='fxp-s32/12',
         help="Fixed-point dtype passed to fxpmath (e.g. 'fxp-s32/12', 'fxp-s24/10').",
+    )
+    parser.add_argument(
+        '--twiddle_dtype',
+        default=None,
+        help="Twiddle factor dtype (e.g. 'fxp-s32/24', 'fxp-s64/48'). Defaults to --dtype if not specified.",
     )
     args = parser.parse_args()
 
@@ -124,4 +149,5 @@ if __name__ == '__main__':
         stage_radices=[3, 3, 3],
         N=27,
         dtype=args.dtype,
+        twiddle_dtype=args.twiddle_dtype,
     )
