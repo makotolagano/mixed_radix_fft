@@ -101,7 +101,7 @@ def sqnr(ref, test):
 
 def generate_signal(kind, n):
     if kind == 'single_tone':
-        k = 3
+        k = 33
         idx = np.arange(n, dtype=float)
         return np.sqrt(2) * np.exp(2j * np.pi * k * idx / n)
     if kind == 'sine':

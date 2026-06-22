@@ -25,13 +25,13 @@ class _Quantizer:
         return f'fxp-s{total_bits}/{frac_bits}'
 
     def q(self, value):
-        return float(Fxp(value).like(self.DATA))
+        return float(Fxp(value, like=self.DATA))
 
     def qc(self, value):
         return complex(self.q(np.real(value)), self.q(np.imag(value)))
 
     def qw(self, value):
-        return float(Fxp(value).like(self.DATA_WIDE))
+        return float(Fxp(value, like=self.DATA_WIDE))
 
     def qcw(self, value):
         return complex(self.qw(np.real(value)), self.qw(np.imag(value)))
