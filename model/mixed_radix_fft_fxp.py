@@ -6,12 +6,12 @@ from utils import Fifo
 
 
 class _Quantizer:
-    def __init__(self, dtype='fxp-s32/12', internal_growth_bits=4, overflow='saturate'):
+    def __init__(self, dtype='fxp-s32/12', internal_growth_bits=3, overflow='saturate'):
         self.DATA = Fxp(None, True, dtype=dtype)
-        self.DATA.config.rounding = 'around'
+        self.DATA.config.rounding = 'trunc'
         self.DATA.config.overflow = overflow
         self.DATA_WIDE = Fxp(None, True, dtype=self._grow_dtype(dtype, internal_growth_bits))
-        self.DATA_WIDE.config.rounding = 'around'
+        self.DATA_WIDE.config.rounding = 'trunc'
         self.DATA_WIDE.config.overflow = overflow
 
     @staticmethod
@@ -38,8 +38,12 @@ class _Quantizer:
 
     def q_shifted(self, value, bits):
         if bits == 0:
-            return self.q(value)
-        return self.q(value / (2 ** bits))
+            return self.qw(value)
+
+        fxp_value = Fxp(value, True, dtype=self.DATA_WIDE.dtype)
+        shifted = Fxp(None, True, dtype=self.DATA_WIDE.dtype)
+        shifted.val = fxp_value.val >> bits
+        return float(shifted)
 
     def qcw_shifted(self, value, bits):
         if bits == 0:
@@ -87,14 +91,11 @@ class MixedRadix_PreAdder_FXP:
         tmp_0_2 = self.qz.qcw(tmp_0_1 + tmp_1_1)
 
         if s0 == 0:
-            mul_0 = -1.0
+            tmp_1_2 = self.qz.qcw(tmp_0_1 - tmp_1_1)
         elif s0 == 1:
-            mul_0 = -0.5
+            tmp_1_2 = self.qz.qcw(tmp_0_1 - self.qz.qcw_shifted(tmp_1_1, 1))
         else:
-            mul_0 = -0.25
-        mul_0 = self.qz.qw(mul_0)
-
-        tmp_1_2 = self.qz.qcw(tmp_0_1 + self.qz.qcw(tmp_1_1 * mul_0))
+            tmp_1_2 = self.qz.qcw(tmp_0_1 - self.qz.qcw_shifted(tmp_1_1, 2))
 
         mul_1 = self.k6 if (s1 == 0) else self.k2
         mul_1_res = self.qz.qcw(tmp_2_1 * mul_1)
@@ -116,26 +117,26 @@ class MixedRadix_PreAdder_FXP:
         tmp_4_3 = self.qz.qcw(tmp_4_2 + tmp_5_2)
 
         # apply optional right-shift scaling before final rounding/quantization
-        self.output_0 = self.qz.qc(tmp_0_3 / (2 ** self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_0_3)
+        self.output_0 = self.qz.qc(self.qz.qcw_shifted(tmp_0_3, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_0_3)
 
         tmp_out_1_radix5 = tmp_1_3 + tmp_3_3
         tmp_out_1_radix3 = tmp_1_3
         tmp_out_1_radix2 = tmp_5_3
 
         if s0 == 0:
-            self.output_1 = self.qz.qc(tmp_out_1_radix2 / (2 ** self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_out_1_radix2)
+            self.output_1 = self.qz.qc(self.qz.qcw_shifted(tmp_out_1_radix2, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_out_1_radix2)
         elif s0 == 1:
-            self.output_1 = self.qz.qc(tmp_out_1_radix3 / (2 ** self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_out_1_radix3)
+            self.output_1 = self.qz.qc(self.qz.qcw_shifted(tmp_out_1_radix3, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_out_1_radix3)
         else:
-            self.output_1 = self.qz.qc(tmp_out_1_radix5 / (2 ** self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_out_1_radix5)
+            self.output_1 = self.qz.qc(self.qz.qcw_shifted(tmp_out_1_radix5, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_out_1_radix5)
 
         tmp_out_2_radix5 = tmp_2_3 + tmp_4_3
         tmp_out_2_radix3 = tmp_2_3
         out2_val = tmp_out_2_radix3 if (s1 == 0) else tmp_out_2_radix5
-        self.output_2 = self.qz.qc(out2_val / (2 ** self.shift_bits)) if self.shift_bits else self.qz.qc(out2_val)
+        self.output_2 = self.qz.qc(self.qz.qcw_shifted(out2_val, self.shift_bits)) if self.shift_bits else self.qz.qc(out2_val)
 
-        self.output_4 = self.qz.qc((tmp_1_3 - tmp_3_3) / (2 ** self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_1_3 - tmp_3_3)
-        self.output_3 = self.qz.qc((tmp_2_3 - tmp_4_3) / (2 ** self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_2_3 - tmp_4_3)
+        self.output_4 = self.qz.qc(self.qz.qcw_shifted(tmp_1_3 - tmp_3_3, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_1_3 - tmp_3_3)
+        self.output_3 = self.qz.qc(self.qz.qcw_shifted(tmp_2_3 - tmp_4_3, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_2_3 - tmp_4_3)
 
 
 class MixedRadix_Rotator_FXP:
@@ -364,7 +365,7 @@ class MixedRadix_SDF_stage_counter_ctrl_FXP:
 
 
 class MixedRadix_FinalScaler_FXP:
-    def __init__(self, size, total_shift=0, dtype='fxp-s32/12', internal_growth_bits=4, overflow='saturate'):
+    def __init__(self, size, total_shift=0, dtype='fxp-s32/12', internal_growth_bits=3, overflow='saturate'):
         self.size = int(size)
         self.total_shift = int(total_shift)
         self.qz = _Quantizer(dtype=dtype, internal_growth_bits=internal_growth_bits, overflow=overflow)

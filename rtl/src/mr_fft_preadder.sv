@@ -89,6 +89,7 @@ module mr_fft_preadder import mr_fft_pkg::*; #(
         t_2[0].re = t_1[0].re + t_1[1].re;
         t_2[0].im = t_1[0].im + t_1[1].im;
 
+        // t_2_inter -> vhdl t2_s0_mux_out
         if (i_s0 == 2'b00) begin // no shift
             t_2_inter = t_1[1];
         end else if (i_s0 == 2'b01) begin // shift > by 1
@@ -104,8 +105,8 @@ module mr_fft_preadder import mr_fft_pkg::*; #(
         end else begin
             t_2_inter = t_1[1];
         end
-        t_2[1].re = t_1[0].re + t_2_inter.re;
-        t_2[1].im = t_1[0].im + t_2_inter.im;
+        t_2[1].re = t_1[0].re - t_2_inter.re;
+        t_2[1].im = t_1[0].im - t_2_inter.im;
 
         if (i_s1 == 1'b1) begin
             t_2_mul1.re = t_1[2].re * k6;
