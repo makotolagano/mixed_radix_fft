@@ -6,12 +6,12 @@ from utils import Fifo
 
 
 class _Quantizer:
-    def __init__(self, dtype='fxp-s32/12', internal_growth_bits=3, overflow='saturate'):
+    def __init__(self, dtype='fxp-s32/12', internal_growth_bits=3, overflow='wrap'):
         self.DATA = Fxp(None, True, dtype=dtype)
-        self.DATA.config.rounding = 'trunc'
+        self.DATA.config.rounding = 'floor'
         self.DATA.config.overflow = overflow
         self.DATA_WIDE = Fxp(None, True, dtype=self._grow_dtype(dtype, internal_growth_bits))
-        self.DATA_WIDE.config.rounding = 'trunc'
+        self.DATA_WIDE.config.rounding = 'floor'
         self.DATA_WIDE.config.overflow = overflow
 
     @staticmethod
@@ -52,7 +52,7 @@ class _Quantizer:
 
 
 class MixedRadix_PreAdder_FXP:
-    def __init__(self, dtype='fxp-s32/12', shift_bits=0, overflow='saturate'):
+    def __init__(self, dtype='fxp-s32/12', shift_bits=0, overflow='wrap'):
         self.qz = _Quantizer(dtype=dtype, overflow=overflow)
         self.shift_bits = int(shift_bits)
 
@@ -75,6 +75,12 @@ class MixedRadix_PreAdder_FXP:
         self.k6 = self.qz.qw(-np.sqrt(3) / 2)
 
     def calculate(self, s0, s1):
+        self.input_0 = self.qz.qc(self.input_0)
+        self.input_1 = self.qz.qc(self.input_1)
+        self.input_2 = self.qz.qc(self.input_2)
+        self.input_3 = self.qz.qc(self.input_3)
+        self.input_4 = self.qz.qc(self.input_4)
+
         tmp_0_0 = self.qz.qcw(self.input_0)
         tmp_1_0 = self.qz.qcw(self.input_1 + self.input_4)
         tmp_2_0 = self.qz.qcw(self.input_2 + self.input_3)

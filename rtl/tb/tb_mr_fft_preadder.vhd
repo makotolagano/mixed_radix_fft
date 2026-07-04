@@ -1,6 +1,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.fixed_pkg.all;
+use ieee.fixed_float_types.all;
 
 library work;
 use work.mr_fft_pkg.all;
@@ -42,11 +43,11 @@ begin
 
     stimulus: process
     begin
-        i_x0 <= (re => to_sfixed(1.0, c_fxp_int_width-1, -c_fxp_frac_width), im => to_sfixed(1.0, c_fxp_int_width-1, -c_fxp_frac_width));
-        i_x1 <= (re => to_sfixed(0.5, c_fxp_int_width-1, -c_fxp_frac_width), im => to_sfixed(0.5, c_fxp_int_width-1, -c_fxp_frac_width));
-        i_x2 <= (re => to_sfixed(0.3, c_fxp_int_width-1, -c_fxp_frac_width), im => to_sfixed(0.3, c_fxp_int_width-1, -c_fxp_frac_width));
-        i_x3 <= (re => to_sfixed(0.2, c_fxp_int_width-1, -c_fxp_frac_width), im => to_sfixed(0.2, c_fxp_int_width-1, -c_fxp_frac_width));
-        i_x4 <= (re => to_sfixed(0.1, c_fxp_int_width-1, -c_fxp_frac_width), im => to_sfixed(0.1, c_fxp_int_width-1, -c_fxp_frac_width));
+        i_x0 <= (re => to_sfixed(1.0, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate), im => to_sfixed(1.0, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate));
+        i_x1 <= (re => to_sfixed(0.5, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate), im => to_sfixed(0.5, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate));
+        i_x2 <= (re => to_sfixed(0.3, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate), im => to_sfixed(0.3, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate));
+        i_x3 <= (re => to_sfixed(0.2, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate), im => to_sfixed(0.2, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate));
+        i_x4 <= (re => to_sfixed(0.1, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate), im => to_sfixed(0.1, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate));
         i_s0 <= "10";
         i_s1 <= '1';
         wait for 10 ns;
