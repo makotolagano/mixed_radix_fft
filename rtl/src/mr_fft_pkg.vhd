@@ -13,6 +13,8 @@ package mr_fft_pkg is
 	constant c_guard_bits 				 : integer := 3;
 	constant c_fxp_int_wide_width  : integer := 4;
 	constant c_fxp_frac_wide_width : integer := 14;
+	constant c_coeff_int_width 		 : integer := 2;
+	constant c_coeff_frac_width 	 : integer := 16;
 	constant c_twiddle_int_width   : integer := 2;
 	constant c_twiddle_frac_width  : integer := 16;
 
@@ -33,9 +35,14 @@ package mr_fft_pkg is
 		im : sfixed(c_fxp_int_wide_width-1 downto -c_fxp_frac_wide_width);
   end record t_cmplx_wide;
 
+	type t_cmplx_coeff is record
+		re : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width);
+		im : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width);
+	end record t_cmplx_coeff;
+
   type t_cmplx_wide_mult is record
-		re : sfixed(c_fxp_int_width+1-1 downto -c_fxp_frac_width+1);
-		im : sfixed(c_fxp_int_width+1-1 downto -c_fxp_frac_width+1);
+		re : sfixed(c_fxp_int_wide_width+c_coeff_int_width+1-1 downto -(c_fxp_frac_wide_width+c_coeff_frac_width));
+		im : sfixed(c_fxp_int_wide_width+c_coeff_int_width+1-1 downto -(c_fxp_frac_wide_width+c_coeff_frac_width));
   end record t_cmplx_wide_mult;
 
   type t_cmplx_twiddle is record
@@ -47,47 +54,47 @@ package mr_fft_pkg is
 	-- visible at analysis time to units that `use` this package.
 	function "+" (left, right : t_cmplx_wide) return t_cmplx_wide;
 	function "-" (left, right : t_cmplx_wide) return t_cmplx_wide;
-	function "*" (left, right : t_cmplx_wide) return t_cmplx_wide;
+	function "*" (left : t_cmplx_wide; right : t_cmplx_coeff) return t_cmplx_wide;
 	function resize(arg : t_cmplx; size_res : t_cmplx_wide) return t_cmplx_wide;
 	function resize(arg : t_cmplx_wide; size_res : t_cmplx) return t_cmplx;
 	function shift_right(arg : t_cmplx_wide; shift_amount : integer) return t_cmplx_wide;
 
-	constant c_k2_re : sfixed(c_fxp_int_wide_width-1 downto -c_fxp_frac_wide_width):=
-		to_sfixed(0.5 * (COS(MATH_2_PI / 5.0) - COS(2.0 * MATH_2_PI / 5.0)), c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_truncate);
+	constant c_k2_re : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width):=
+		to_sfixed(0.5 * (COS(MATH_2_PI / 5.0) - COS(2.0 * MATH_2_PI / 5.0)), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_truncate);
 
-	constant c_k2 : t_cmplx_wide := (
+	constant c_k2 : t_cmplx_coeff := (
 		re => c_k2_re,
 		im => (others => '0')
 	);
 
-	constant c_k3_im : sfixed(c_fxp_int_wide_width-1 downto -c_fxp_frac_wide_width) :=
-		to_sfixed(SIN(2.0 * MATH_2_PI / 5.0) - SIN(MATH_2_PI / 5.0), c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_truncate);
+	constant c_k3_im : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width) :=
+		to_sfixed(SIN(2.0 * MATH_2_PI / 5.0) - SIN(MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_truncate);
 
-	constant c_k3 : t_cmplx_wide := (
+	constant c_k3 : t_cmplx_coeff := (
 		re => (others => '0'),
 		im => c_k3_im
 	);
 
-	constant c_k4_im : sfixed(c_fxp_int_wide_width-1 downto -c_fxp_frac_wide_width) :=
-		to_sfixed(-SIN(2.0 * MATH_2_PI / 5.0), c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_truncate);
+	constant c_k4_im : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width) :=
+		to_sfixed(-SIN(2.0 * MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_truncate);
 
-	constant c_k4 : t_cmplx_wide := (
+	constant c_k4 : t_cmplx_coeff := (
 		re => (others => '0'),
 		im => c_k4_im
 	);
 
-	constant c_k5_im : sfixed(c_fxp_int_wide_width-1 downto -c_fxp_frac_wide_width) :=
-		to_sfixed(SIN(2.0 * MATH_2_PI / 5.0) + SIN(MATH_2_PI / 5.0), c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_truncate);
+	constant c_k5_im : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width) :=
+		to_sfixed(SIN(2.0 * MATH_2_PI / 5.0) + SIN(MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_truncate);
 
-	constant c_k5 : t_cmplx_wide := (
+	constant c_k5 : t_cmplx_coeff := (
 		re => (others => '0'),
 		im => c_k5_im
 	);
 
-	constant c_k6_re : sfixed(c_fxp_int_wide_width-1 downto -c_fxp_frac_wide_width) :=
-		to_sfixed(-SQRT(3.0) / 2.0, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_truncate);
+	constant c_k6_re : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width) :=
+		to_sfixed(-SQRT(3.0) / 2.0, c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_truncate);
 
-	constant c_k6 : t_cmplx_wide := (
+	constant c_k6 : t_cmplx_coeff := (
 		re => c_k6_re,
 		im => (others => '0')
 	);
@@ -399,7 +406,7 @@ package body mr_fft_pkg is
 		return result;
 	end function;
 
-	function "*" (left, right : t_cmplx_wide) return t_cmplx_wide is
+	function "*" (left : t_cmplx_wide; right : t_cmplx_coeff) return t_cmplx_wide is
 		variable result 		 : t_cmplx_wide;
 		variable mult_result : t_cmplx_wide_mult;
 	begin

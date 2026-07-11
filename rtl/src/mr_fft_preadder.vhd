@@ -9,9 +9,11 @@ use work.mr_fft_pkg.all;
 
 entity mr_fft_preadder is
 	generic (
-		G_CAPABILITY : natural := 0
+		G_CAPABILITY : natural := 2
 	);
 	port (
+		i_clk : in  std_logic;
+
 		i_x0 : in  t_cmplx;
 		i_x1 : in  t_cmplx;
 		i_x2 : in  t_cmplx;
@@ -48,6 +50,7 @@ begin
 	GEN_235: if G_CAPABILITY = 2 generate
 		PROC_CALC_235: process(input_x0_wide, input_x1_wide, input_x2_wide, input_x3_wide, input_x4_wide, i_s0, i_s1)
 			variable t2_s0_mux_out, t2_mul1_out, t2_mul2_out, t2_mul3_out, t2_mul4_out : t_cmplx_wide;
+			variable t2_mul1_in : t_cmplx_coeff;
 			variable t0, t1, t2, t3 																									 : t_cmplx_wide_array;
 		begin
 			-- Stage 0
@@ -83,12 +86,13 @@ begin
 
 			case i_s1 is
 				when '0' => -- mul with k6
-					t2_mul1_out := t1(2) * c_k6;
+					t2_mul1_in := c_k6;
 				when '1' => -- mul with k2
-					t2_mul1_out := t1(2) * c_k2;
+					t2_mul1_in := c_k2;
 				when others =>
-					t2_mul1_out := t1(2); -- default case, no multiplication
+					t2_mul1_in := c_k2; -- default case, no multiplication
 			end case;
+			t2_mul1_out := t1(2) * t2_mul1_in;
 
 			case i_s1 is
 				when '0' => -- mul with j
