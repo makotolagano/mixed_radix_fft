@@ -37,9 +37,9 @@ $(error Could not determine TB_NAME from $(FILELIST_VHDL_TB). Add a line matchin
 endif
 
 # Targets
-.PHONY: all clean check-env compile elaborate simulate wave
+.PHONY: all clean check-env compile elaborate sim wave
 
-all: simulate
+all: sim
 
 check-env:
 	@echo "##### CHECKING TOOLCHAIN #####"
@@ -58,11 +58,11 @@ elaborate: compile
 	@echo "##### ELABORATING #####"
 	xelab $(XELAB_OPTS) $(TB_NAME) -snapshot $(TB_NAME)_sim -log $(SIM_DIR)/elaborate.log
 
-simulate: elaborate
+sim: elaborate
 	@echo "##### RUNNING SIMULATION #####"
-	xsim $(TB_NAME)_sim -tclbatch xsim_cfg.tcl -log $(SIM_DIR)/simulate.log
+	xsim $(TB_NAME)_sim -tclbatch xsim_cfg.tcl -log $(SIM_DIR)/sim.log
 
-wave: simulate
+wave: sim
 	@echo "##### OPENING WAVEFORM #####"
 	xsim --gui $(TB_NAME)_sim -tclbatch xsim_wave.tcl
 
