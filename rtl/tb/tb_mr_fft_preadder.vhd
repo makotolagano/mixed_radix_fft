@@ -26,6 +26,9 @@ architecture tb of tb_mr_fft_preadder is
 	signal o_X4    : t_cmplx;
 begin
 	dut: entity work.mr_fft_preadder
+		generic map (
+			G_CAPABILITY => 0
+		)
 		port map (
 			i_x0 => i_x0,
 			i_x1 => i_x1,
@@ -45,10 +48,10 @@ begin
 	begin
 		i_x0 <= (re => to_sfixed(1.0, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate), im => to_sfixed(1.0, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate));
 		i_x1 <= (re => to_sfixed(0.5, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate), im => to_sfixed(0.5, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate));
-		i_x2 <= (re => to_sfixed(0.3, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate), im => to_sfixed(0.3, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate));
+		i_x2 <= (re => to_sfixed(0.0, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate), im => to_sfixed(0.0, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate));
 		i_x3 <= (re => to_sfixed(0.2, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate), im => to_sfixed(0.2, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate));
 		i_x4 <= (re => to_sfixed(0.1, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate), im => to_sfixed(0.1, c_fxp_int_width-1, -c_fxp_frac_width, fixed_wrap, fixed_truncate));
-		i_s0 <= "10";
+		i_s0 <= "00";
 		i_s1 <= '1';
 		wait for 10 ns;
 		wait for 10 ns;
