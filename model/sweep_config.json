@@ -1,6 +1,10 @@
 {
-  "n_expr": "3*3*2*2*2*2*2",
+  "n_expr": "2*2*2*2*2*2*2*2*2*2",
   "signals": ["single_tone"],
-  "dtypes": ["fxp-s12/8", "fxp-s13/9", "fxp-s14/10", "fxp-s15/11", "fxp-s16/12", "fxp-s17/13", "fxp-s18/14"],
-  "twiddle_dtypes": ["fxp-s22/18"]
+  "input_dtype": "fxp-s16/13",
+  "dtypes": ["fxp-s18/14"],
+  "twiddle_dtypes": ["fxp-s18/16"],
+  "coeff_dtype": "fxp-s18/16",
+  "output_dtype": "fxp-s18/14",
+  "rounding": "around"
 }

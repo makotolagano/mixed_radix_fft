@@ -17,7 +17,17 @@ except Exception as exc:
     raise ImportError('matplotlib is required for plotting. Install it in your env.') from exc
 
 
-def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12', twiddle_dtype=None):
+def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12', twiddle_dtype=None,
+              input_dtype=None, coeff_dtype=None, output_dtype=None, rounding=None):
+    # dtype is the inner_type (datapath). input_dtype quantizes the chain input (first
+    # stage only), coeff_dtype the preadder constants, output_dtype the final result.
+    # rounding, when set, is a GLOBAL override applied to every quantizer (datapath,
+    # coefficients, and twiddles). When None, the model keeps its defaults: 'floor'
+    # (truncation) on the datapath and 'around' (round-to-nearest) on the twiddles.
+    if rounding is None:
+        data_rounding, tw_rounding = 'floor', 'around'
+    else:
+        data_rounding = tw_rounding = rounding
     # allow a single config (int) or a per-stage iterable (list/tuple/ndarray)
     if hasattr(config, '__iter__') and not isinstance(config, (str, bytes)):
         configs = list(config)
@@ -31,7 +41,7 @@ def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12', twiddle_dty
     stages_fxp = []
     total_shift = 0
 
-    for cfg, size in zip(configs, stage_sizes):
+    for stage_pos, (cfg, size) in enumerate(zip(configs, stage_sizes)):
         if cfg == 5:
             delay = size // 5
             total_shift += 3
@@ -58,12 +68,17 @@ def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12', twiddle_dty
                 cfg_delay=delay,
                 dtype=dtype,
                 twiddle_dtype=twiddle_dtype,
+                coeff_dtype=coeff_dtype,
+                input_dtype=(input_dtype if stage_pos == 0 else None),
+                rounding=data_rounding,
+                twiddle_rounding=tw_rounding,
+                capability=cfg,
             )
         )
 
     out_fp = []
     out_fxp = []
-    final_scaler = MixedRadix_FinalScaler_FXP(size=stage_sizes[0], total_shift=total_shift, dtype=dtype)
+    final_scaler = MixedRadix_FinalScaler_FXP(size=stage_sizes[0], total_shift=total_shift, dtype=output_dtype, output_dtype=output_dtype, rounding=data_rounding)
     print(f"Scale = {str(2**total_shift/stage_sizes[0])}")
 
     for sample in input_signal:
@@ -166,7 +181,8 @@ def total_chain_latency(configs, stage_sizes):
     return total
 
 
-def evaluate_case(case_name, config, stage_sizes, stage_radices, dtypes, twiddle_dtypes, signal_kind):
+def evaluate_case(case_name, config, stage_sizes, stage_radices, dtypes, twiddle_dtypes, signal_kind,
+                  input_dtype=None, coeff_dtype=None, output_dtype=None, rounding=None):
     n = int(np.prod(stage_radices))
     x = generate_signal(signal_kind, n)
     x_pad = np.append(x, np.zeros(n))
@@ -193,6 +209,10 @@ def evaluate_case(case_name, config, stage_sizes, stage_radices, dtypes, twiddle
                 input_signal=x_pad,
                 dtype=dtype,
                 twiddle_dtype=twiddle_dtype,
+                input_dtype=input_dtype,
+                coeff_dtype=coeff_dtype,
+                output_dtype=output_dtype,
+                rounding=rounding,
             )
             fxp_ss = fxp_out[latency:latency + n]
             fxp_ss = fxp_ss[digit_reverse(list(reversed(stage_radices)))]
@@ -360,6 +380,28 @@ def parse_args():
         help='Twiddle factor dtype (e.g. "fxp-s32/24", "fxp-s64/48"). Defaults to --dtypes if not specified.',
     )
     parser.add_argument(
+        '--input_dtype',
+        default=None,
+        help='Chain input word (fxpmath dtype). Defaults to the datapath --dtypes value.',
+    )
+    parser.add_argument(
+        '--coeff_dtype',
+        default=None,
+        help='Preadder coefficient word. Defaults to the datapath --dtypes value.',
+    )
+    parser.add_argument(
+        '--output_dtype',
+        default=None,
+        help='Final result word out of the scaler. Defaults to the datapath --dtypes value.',
+    )
+    parser.add_argument(
+        '--rounding',
+        choices=['floor', 'around'],
+        default=None,
+        help="Global rounding for EVERY quantizer (datapath, coeffs, twiddles). "
+             "Default (unset) keeps 'floor' on the datapath and 'around' on twiddles.",
+    )
+    parser.add_argument(
         '--sweep-file',
         default='sweep_config.json',
         help='JSON file containing sweep settings for dtypes and twiddle_dtypes.',
@@ -410,6 +452,10 @@ def main():
             args.twiddle_dtypes = sweep_cfg.get('twiddle_dtypes')
         else:
             args.twiddle_dtypes = [args.twiddle_dtype] if args.twiddle_dtype else [None]
+        args.input_dtype = sweep_cfg.get('input_dtype', args.input_dtype)
+        args.coeff_dtype = sweep_cfg.get('coeff_dtype', args.coeff_dtype)
+        args.output_dtype = sweep_cfg.get('output_dtype', args.output_dtype)
+        args.rounding = sweep_cfg.get('rounding', args.rounding)
     else:
         args.signals = [args.signal]
         args.twiddle_dtypes = [args.twiddle_dtype] if args.twiddle_dtype else [None]
@@ -438,6 +484,10 @@ def main():
             dtypes=args.dtypes,
             twiddle_dtypes=args.twiddle_dtypes,
             signal_kind=case['signal_kind'],
+            input_dtype=args.input_dtype,
+            coeff_dtype=args.coeff_dtype,
+            output_dtype=args.output_dtype,
+            rounding=args.rounding,
         )
         print_summary_table(result)
         all_plot_paths.extend(save_plots(result, out_dir))
