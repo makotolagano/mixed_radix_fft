@@ -8,3 +8,4 @@ scripts/*.wdb
 scripts/*.str
 scripts/*.pb
 scripts/*.jou
+model/results*
