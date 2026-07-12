@@ -10,6 +10,7 @@ package mr_fft_pkg is
 
 	constant c_fxp_int_width 		 	 : integer := 5;
 	constant c_fxp_frac_width 		 : integer := 12;
+	constant c_fxp_word_width 		 : integer := c_fxp_int_width + c_fxp_frac_width;
 	constant c_guard_bits 				 : integer := 3;
 	-- The Python model (MixedRadix_PreAdder_FXP) quantizes ports and every
 	-- intermediate at ONE dtype (inner_type); the wide format must therefore
@@ -43,6 +44,11 @@ package mr_fft_pkg is
 		im : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width);
 	end record t_cmplx_coeff;
 
+	type t_cmplx_mult is record
+		re : sfixed(c_fxp_int_width+c_twiddle_int_width+1-1 downto -(c_fxp_frac_width+c_twiddle_frac_width));
+		im : sfixed(c_fxp_int_width+c_twiddle_int_width+1-1 downto -(c_fxp_frac_width+c_twiddle_frac_width));
+  end record t_cmplx_mult;
+
   type t_cmplx_wide_mult is record
 		re : sfixed(c_fxp_int_wide_width+c_coeff_int_width+1-1 downto -(c_fxp_frac_wide_width+c_coeff_frac_width));
 		im : sfixed(c_fxp_int_wide_width+c_coeff_int_width+1-1 downto -(c_fxp_frac_wide_width+c_coeff_frac_width));
@@ -55,9 +61,11 @@ package mr_fft_pkg is
 
 	-- Declare arithmetic operator prototypes for t_cmplx so they are
 	-- visible at analysis time to units that `use` this package.
+	function clogb2(n : integer) return integer;
 	function "+" (left, right : t_cmplx_wide) return t_cmplx_wide;
 	function "-" (left, right : t_cmplx_wide) return t_cmplx_wide;
 	function "*" (left : t_cmplx_wide; right : t_cmplx_coeff) return t_cmplx_wide;
+	function "*" (left : t_cmplx; right : t_cmplx_twiddle) return t_cmplx;
 	function resize(arg : t_cmplx; size_res : t_cmplx_wide) return t_cmplx_wide;
 	function resize(arg : t_cmplx_wide; size_res : t_cmplx) return t_cmplx;
 	function shift_right(arg : t_cmplx_wide; shift_amount : integer) return t_cmplx_wide;
@@ -393,6 +401,21 @@ end package mr_fft_pkg;
 -- Mixed Radix FFT Package Body Section
 package body mr_fft_pkg is
 
+	-- ceil(log2(n)), minimum of 1 bit.
+	function clogb2(n : integer) return integer is
+		variable res : integer := 0;
+		variable v   : integer := n - 1;
+	begin
+		while v > 0 loop
+			res := res + 1;
+			v   := v / 2;
+		end loop;
+		if res = 0 then
+			res := 1;
+		end if;
+		return res;
+	end function;
+
 	function "+" (left, right : t_cmplx_wide) return t_cmplx_wide is
     variable result : t_cmplx_wide;
 	begin
@@ -412,6 +435,17 @@ package body mr_fft_pkg is
 	function "*" (left : t_cmplx_wide; right : t_cmplx_coeff) return t_cmplx_wide is
 		variable result 		 : t_cmplx_wide;
 		variable mult_result : t_cmplx_wide_mult;
+	begin
+		mult_result.re := left.re * right.re - left.im * right.im;
+		mult_result.im := left.re * right.im + left.im * right.re;
+		result.re := resize(mult_result.re, result.re, fixed_wrap, fixed_round);
+		result.im := resize(mult_result.im, result.im, fixed_wrap, fixed_round);
+		return result;
+	end function;
+
+	function "*" (left : t_cmplx; right : t_cmplx_twiddle) return t_cmplx is
+		variable result 		 : t_cmplx;
+		variable mult_result : t_cmplx_mult;
 	begin
 		mult_result.re := left.re * right.re - left.im * right.im;
 		mult_result.im := left.re * right.im + left.im * right.re;
