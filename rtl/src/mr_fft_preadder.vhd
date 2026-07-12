@@ -1,6 +1,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.fixed_pkg.all;
+use ieee.fixed_float_types.all;
 
 -- Custom packages
 library work;
@@ -96,7 +97,7 @@ begin
 
 			case i_s1 is
 				when '0' => -- mul with j
-					t2(2).re := resize(-t2_mul1_out.im, t2(2).re);
+					t2(2).re := resize(-t2_mul1_out.im, t2(2).re, fixed_wrap, fixed_round);
 					t2(2).im := t2_mul1_out.re;
 				when '1' => -- passthrough
 					t2(2) := t2_mul1_out;
@@ -167,14 +168,14 @@ begin
 				when '1' => -- arithmetic shift right by 1
 					t1_s0_mux_out := shift_right(t0(1), 1);
 				when others =>
-					t1_s0_mux_out := t1(1); -- default case, no shift
+					t1_s0_mux_out := t0(1); -- default case, no shift
 			end case;
 
 			t1(1) := t0(0) - t1_s0_mux_out;
 
 			t1_mul1_out := t0(2) * c_k6;
 			-- Apply multiplication by j
-			t1(2).re := resize(-t1_mul1_out.im, t1(2).re);
+			t1(2).re := resize(-t1_mul1_out.im, t1(2).re, fixed_wrap, fixed_round);
 			t1(2).im := t1_mul1_out.re;
 
 			-- Stage 2

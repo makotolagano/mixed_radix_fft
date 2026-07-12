@@ -11,8 +11,11 @@ package mr_fft_pkg is
 	constant c_fxp_int_width 		 	 : integer := 5;
 	constant c_fxp_frac_width 		 : integer := 12;
 	constant c_guard_bits 				 : integer := 3;
-	constant c_fxp_int_wide_width  : integer := 4;
-	constant c_fxp_frac_wide_width : integer := 14;
+	-- The Python model (MixedRadix_PreAdder_FXP) quantizes ports and every
+	-- intermediate at ONE dtype (inner_type); the wide format must therefore
+	-- equal the data format to stay bit-exact with it.
+	constant c_fxp_int_wide_width  : integer := c_fxp_int_width;
+	constant c_fxp_frac_wide_width : integer := c_fxp_frac_width;
 	constant c_coeff_int_width 		 : integer := 2;
 	constant c_coeff_frac_width 	 : integer := 16;
 	constant c_twiddle_int_width   : integer := 2;
@@ -60,7 +63,7 @@ package mr_fft_pkg is
 	function shift_right(arg : t_cmplx_wide; shift_amount : integer) return t_cmplx_wide;
 
 	constant c_k2_re : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width):=
-		to_sfixed(0.5 * (COS(MATH_2_PI / 5.0) - COS(2.0 * MATH_2_PI / 5.0)), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_truncate);
+		to_sfixed(0.5 * (COS(MATH_2_PI / 5.0) - COS(2.0 * MATH_2_PI / 5.0)), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_round);
 
 	constant c_k2 : t_cmplx_coeff := (
 		re => c_k2_re,
@@ -68,7 +71,7 @@ package mr_fft_pkg is
 	);
 
 	constant c_k3_im : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width) :=
-		to_sfixed(SIN(2.0 * MATH_2_PI / 5.0) - SIN(MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_truncate);
+		to_sfixed(SIN(2.0 * MATH_2_PI / 5.0) - SIN(MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_round);
 
 	constant c_k3 : t_cmplx_coeff := (
 		re => (others => '0'),
@@ -76,7 +79,7 @@ package mr_fft_pkg is
 	);
 
 	constant c_k4_im : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width) :=
-		to_sfixed(-SIN(2.0 * MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_truncate);
+		to_sfixed(-SIN(2.0 * MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_round);
 
 	constant c_k4 : t_cmplx_coeff := (
 		re => (others => '0'),
@@ -84,7 +87,7 @@ package mr_fft_pkg is
 	);
 
 	constant c_k5_im : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width) :=
-		to_sfixed(SIN(2.0 * MATH_2_PI / 5.0) + SIN(MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_truncate);
+		to_sfixed(SIN(2.0 * MATH_2_PI / 5.0) + SIN(MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_round);
 
 	constant c_k5 : t_cmplx_coeff := (
 		re => (others => '0'),
@@ -92,7 +95,7 @@ package mr_fft_pkg is
 	);
 
 	constant c_k6_re : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width) :=
-		to_sfixed(-SQRT(3.0) / 2.0, c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_truncate);
+		to_sfixed(-SQRT(3.0) / 2.0, c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_round);
 
 	constant c_k6 : t_cmplx_coeff := (
 		re => c_k6_re,
@@ -393,16 +396,16 @@ package body mr_fft_pkg is
 	function "+" (left, right : t_cmplx_wide) return t_cmplx_wide is
     variable result : t_cmplx_wide;
 	begin
-		result.re := resize(left.re + right.re, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_truncate);
-		result.im := resize(left.im + right.im, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_truncate);
+		result.re := resize(left.re + right.re, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_round);
+		result.im := resize(left.im + right.im, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_round);
 		return result;
 	end function;
 
 	function "-" (left, right : t_cmplx_wide) return t_cmplx_wide is
 		variable result : t_cmplx_wide;
 	begin
-		result.re := resize(left.re - right.re, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_truncate);
-		result.im := resize(left.im - right.im, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_truncate);
+		result.re := resize(left.re - right.re, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_round);
+		result.im := resize(left.im - right.im, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_round);
 		return result;
 	end function;
 
@@ -412,32 +415,32 @@ package body mr_fft_pkg is
 	begin
 		mult_result.re := left.re * right.re - left.im * right.im;
 		mult_result.im := left.re * right.im + left.im * right.re;
-		result.re := resize(mult_result.re, result.re, fixed_wrap, fixed_truncate);
-		result.im := resize(mult_result.im, result.im, fixed_wrap, fixed_truncate);
+		result.re := resize(mult_result.re, result.re, fixed_wrap, fixed_round);
+		result.im := resize(mult_result.im, result.im, fixed_wrap, fixed_round);
 		return result;
 	end function;
 
 	function resize(arg : t_cmplx; size_res : t_cmplx_wide) return t_cmplx_wide is
 		variable result : t_cmplx_wide;
 	begin
-		result.re := resize(arg.re, result.re, fixed_wrap, fixed_truncate);
-		result.im := resize(arg.im, result.im, fixed_wrap, fixed_truncate);
+		result.re := resize(arg.re, result.re, fixed_wrap, fixed_round);
+		result.im := resize(arg.im, result.im, fixed_wrap, fixed_round);
 		return result;
 	end function;
 
 	function resize(arg : t_cmplx_wide; size_res : t_cmplx) return t_cmplx is
 		variable result : t_cmplx;
 	begin
-		result.re := resize(arg.re, result.re, fixed_wrap, fixed_truncate);
-		result.im := resize(arg.im, result.im, fixed_wrap, fixed_truncate);
+		result.re := resize(arg.re, result.re, fixed_wrap, fixed_round);
+		result.im := resize(arg.im, result.im, fixed_wrap, fixed_round);
 		return result;
 	end function;
 
 	function shift_right(arg : t_cmplx_wide; shift_amount : integer) return t_cmplx_wide is
 		variable result : t_cmplx_wide;
 	begin
-		result.re := resize(shift_right(arg.re, shift_amount), result.re, fixed_wrap, fixed_truncate);
-		result.im := resize(shift_right(arg.im, shift_amount), result.im, fixed_wrap, fixed_truncate);
+		result.re := resize(shift_right(arg.re, shift_amount), result.re, fixed_wrap, fixed_round);
+		result.im := resize(shift_right(arg.im, shift_amount), result.im, fixed_wrap, fixed_round);
 		return result;
 	end function;
  
