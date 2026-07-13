@@ -261,6 +261,31 @@ begin
       o_twiddle    => twiddle
     );
 
+    CONTROL_INST: entity work.mr_fft_control
+      generic map (
+        G_CAPABILITY => G_CAPABILITY,
+        G_MAX_RADIX  => C_MAX_RADIX
+      )
+      port map (
+        i_clk => i_clk,
+        i_reset => i_reset,
+
+        i_phase => phase,
+
+        o_config_s0 => s0,
+        o_config_s1 => s1,
+
+        o_preadder_s0 => preadder_s0,
+        o_preadder_s1 => preadder_s1,
+
+        o_input_demux_sel => input_demux_sel,
+        o_output_mux_sel => output_mux_sel,
+
+        o_fifos_we => fifos_we,
+        o_fifos_re => fifos_re,
+        o_fifos_sel => fifos_sel
+      );
+
   o_sample <= output_mux_out;
 
   
