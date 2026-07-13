@@ -9,7 +9,7 @@ use ieee.math_real.all;
 package mr_fft_pkg is
 
 	constant c_fxp_int_width 		 	 : integer := 5;
-	constant c_fxp_frac_width 		 : integer := 12;
+	constant c_fxp_frac_width 		 : integer := 13;
 	constant c_fxp_word_width 		 : integer := c_fxp_int_width + c_fxp_frac_width;
 	constant c_guard_bits 				 : integer := 3;
 	-- The Python model (MixedRadix_PreAdder_FXP) quantizes ports and every
@@ -62,6 +62,8 @@ package mr_fft_pkg is
 	-- Declare arithmetic operator prototypes for t_cmplx so they are
 	-- visible at analysis time to units that `use` this package.
 	function clogb2(n : integer) return integer;
+	function get_max_radix(capability : natural) return natural;
+	function get_delay_cnt(configs : t_config_arr) return natural;
 	function "+" (left, right : t_cmplx_wide) return t_cmplx_wide;
 	function "-" (left, right : t_cmplx_wide) return t_cmplx_wide;
 	function "*" (left : t_cmplx_wide; right : t_cmplx_coeff) return t_cmplx_wide;
@@ -415,6 +417,32 @@ package body mr_fft_pkg is
 		end if;
 		return res;
 	end function;
+
+  function get_max_radix(capability : natural) return natural is
+  begin
+    if capability = 2 then
+      return 5;
+		elsif capability = 1 then
+      return 3;
+    elsif capability = 0 then
+      return 2;
+    else
+      return 0;
+    end if;
+  end function get_max_radix;
+
+	function get_delay_cnt(configs : t_config_arr) return natural is
+		variable max_N : natural := 0;
+		variable radix : natural := 0;
+	begin
+		for i in configs'range loop
+			if configs(i).size > max_N then
+				max_N := configs(i).size;
+				radix := configs(i).radix;
+			end if;
+		end loop;
+		return (max_N/radix);
+	end function get_delay_cnt;
 
 	function "+" (left, right : t_cmplx_wide) return t_cmplx_wide is
     variable result : t_cmplx_wide;

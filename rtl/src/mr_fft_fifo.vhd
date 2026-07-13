@@ -27,15 +27,15 @@ end entity mr_fft_fifo;
 
 architecture rtl of mr_fft_fifo is
 
-  constant C_FIFO_DATA_WIDTH : integer := c_fxp_word_width; -- Width of each FIFO data
+  constant C_FIFO_DATA_WIDTH : integer := 2*c_fxp_word_width; -- Width of each FIFO data
   signal input_sample : std_logic_vector(C_FIFO_DATA_WIDTH - 1 downto 0);
   signal output_sample : std_logic_vector(C_FIFO_DATA_WIDTH - 1 downto 0);
 
 begin
 
   input_sample <= to_slv(i_wr_sample.re) & to_slv(i_wr_sample.im);
-  o_rd_sample.re <= to_sfixed(output_sample(C_FIFO_DATA_WIDTH - 1 downto C_FIFO_DATA_WIDTH/2), c_fxp_int_width, c_fxp_frac_width);
-  o_rd_sample.im <= to_sfixed(output_sample(C_FIFO_DATA_WIDTH/2 - 1 downto 0), c_fxp_int_width, c_fxp_frac_width);
+  o_rd_sample.re <= to_sfixed(output_sample(C_FIFO_DATA_WIDTH - 1 downto C_FIFO_DATA_WIDTH/2), o_rd_sample.re);
+  o_rd_sample.im <= to_sfixed(output_sample(C_FIFO_DATA_WIDTH/2 - 1 downto 0), o_rd_sample.im);
 
 	FIFO_INST: entity work.fifo
     generic map (

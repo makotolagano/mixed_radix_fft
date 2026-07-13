@@ -1,5 +1,6 @@
 library ieee;
 use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
 use ieee.fixed_pkg.all;
 use ieee.fixed_float_types.all;
 
@@ -10,7 +11,8 @@ use work.mr_fft_pkg.all;
 
 entity mr_fft_stage is
 	generic (
-		G_CAPABILITY : natural := 2
+		G_CAPABILITY : natural := 2;
+    G_CONFIGS : t_config_arr
 	);
 	port (
 		i_clk : in  std_logic;
@@ -27,25 +29,18 @@ end entity mr_fft_stage;
 
 architecture rtl of mr_fft_stage is
 
-  function get_max_radix(g_capability : natural) return natural is
-  begin
-    if g_capability = 2 then
-      return 5;
-    elsif g_capability = 1 then
-      return 3;
-    elsif g_capability = 0 then
-      return 2;
-    else
-      return 0;
-    end if;
-  end function get_max_radix;
-
   constant C_MAX_RADIX       : natural := get_max_radix(G_CAPABILITY);
   constant C_NUM_FIFOS       : natural := C_MAX_RADIX - 1; -- Number of FIFOs needed for the given capability
-  constant C_FIFO_DATA_WIDTH : natural := 36; -- Width of each FIFO data
-  constant C_FIFO_DEPTH      : natural := 1024;    -- Depth of each FIFO
+  constant C_FIFO_DATA_WIDTH : natural := c_fxp_word_width; -- Width of each FIFO data
+  constant C_DELAY_CNT       : natural := get_delay_cnt(G_CONFIGS);    -- maximum size of the FFT after this stage
+  constant C_NUM_CONFIGS     : natural := G_CONFIGS'length; -- Number of configurations
+  constant C_FIFO_DEPTH      : natural := C_DELAY_CNT;    -- Depth of each FIFO
 
   signal input_sample : t_cmplx;
+
+  signal config_sel   : std_logic_vector(clogb2(C_NUM_CONFIGS) - 1 downto 0);
+  signal config_radix : std_logic_vector(clogb2(C_MAX_RADIX) - 1 downto 0);
+  signal config_delay : std_logic_vector(clogb2(C_DELAY_CNT) - 1 downto 0);
 
   type t_fifo_data_array is array (0 to C_NUM_FIFOS - 1) of t_cmplx;
   signal fifos_data_in  : t_fifo_data_array;
@@ -71,8 +66,12 @@ architecture rtl of mr_fft_stage is
   type t_output_mux_array is array (0 to C_MAX_RADIX - 1) of t_cmplx;
   signal output_mux_in : t_output_mux_array;
   signal output_mux_out : t_cmplx;
-  signal output_mux_sel : std_logic_vector(clogb2(C_MAX_RADIX-1) - 1 downto 0);
+  signal output_mux_sel : std_logic_vector(clogb2(C_MAX_RADIX) - 1 downto 0);
 
+  signal phase : std_logic_vector(clogb2(C_MAX_RADIX) - 1 downto 0);
+  signal delay_cnt : std_logic_vector(clogb2(C_DELAY_CNT) - 1 downto 0);
+
+  signal twiddle : t_cmplx_twiddle;
 begin
 
   input_sample <= i_sample;
@@ -103,7 +102,7 @@ begin
   GEN_INPUT_DEMUX_235: if G_CAPABILITY = 2 generate
     PROC_INPUT_DEMUX: process(input_sample, input_demux_sel)
     begin
-      input_demux_out <= (others => (others => "0")); -- Default assignment
+      input_demux_out <= (others => (others => (others => '0'))); -- Default assignment
       case input_demux_sel is
         when "00" =>
           input_demux_out(0) <= input_sample;
@@ -113,6 +112,8 @@ begin
           input_demux_out(2) <= input_sample;
         when "11" =>
           input_demux_out(3) <= input_sample;
+        when others =>
+          input_demux_out <= (others => (others => (others => '0'))); -- Default assignment
       end case;
     end process PROC_INPUT_DEMUX;
   end generate GEN_INPUT_DEMUX_235;
@@ -120,7 +121,7 @@ begin
   GEN_INPUT_DEMUX_23: if G_CAPABILITY = 1 generate
     PROC_INPUT_DEMUX: process(input_sample, input_demux_sel)
     begin
-      input_demux_out <= (others => (others => "0")); -- Default assignment
+      input_demux_out <= (others => (others => (others => '0'))); -- Default assignment
       case input_demux_sel is
         when "0" =>
           input_demux_out(0) <= input_sample;
@@ -198,6 +199,8 @@ begin
           output_mux_out <= fifos_data_out(3);
         when "100" =>
           output_mux_out <= preadder_outputs(0);
+        when others =>
+          output_mux_out <= (others => (others => '0')); -- Default assignment
       end case;
     end process PROC_OUTPUT;
 	end generate GEN_MUX_OUTPUT_235;
@@ -220,6 +223,43 @@ begin
   GEN_MUX_OUTPUT_2: if G_CAPABILITY = 0 generate
     output_mux_out <= fifos_data_out(0) when output_mux_sel = "0" else preadder_outputs(0);
   end generate GEN_MUX_OUTPUT_2;
+
+  config_radix <= std_logic_vector(to_unsigned(2, clogb2(C_MAX_RADIX)));
+  config_delay <= std_logic_vector(to_unsigned(C_DELAY_CNT, clogb2(C_DELAY_CNT)));
+  PHASE_DELAY_GEN_INST: entity work.mr_fft_phase_delay_gen
+    generic map (
+      G_CAPABILITY => G_CAPABILITY,
+      G_DELAY_CNT  => C_DELAY_CNT,
+      G_MAX_RADIX  => C_MAX_RADIX
+    )
+    port map (
+      i_clk => i_clk,
+      i_reset => i_reset,
+
+      i_config_radix => config_radix,
+      i_config_delay => config_delay,
+      i_en => '1',
+
+      o_phase => phase,
+      o_delay_cnt => delay_cnt
+    );
+
+  config_sel <= (others => '0'); -- Default assignment
+  TWIDDLE_ROM_INST: entity work.twiddle_rom
+    generic map (
+      CONFIGS => G_CONFIGS,
+      SEL_WIDTH => clogb2(C_NUM_CONFIGS),
+      K_WIDTH => clogb2(C_DELAY_CNT),
+      REGISTERED => true
+    )
+    port map (
+      i_clk => i_clk,
+
+      i_config_sel => config_sel,
+      i_k          => delay_cnt,
+
+      o_twiddle    => twiddle
+    );
 
   o_sample <= output_mux_out;
 
