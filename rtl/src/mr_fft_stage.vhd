@@ -18,10 +18,9 @@ entity mr_fft_stage is
 		i_clk : in  std_logic;
     i_reset : in  std_logic;
 
-		i_sample : in  t_cmplx;
+    i_config : in  t_config;
 
-		i_s0 : in  std_logic_vector(1 downto 0);
-		i_s1 : in  std_logic;
+		i_sample : in  t_cmplx;
 
 		o_sample : out t_cmplx
 	);
@@ -45,9 +44,9 @@ architecture rtl of mr_fft_stage is
   type t_fifo_data_array is array (0 to C_NUM_FIFOS - 1) of t_cmplx;
   signal fifos_data_in  : t_fifo_data_array;
   signal fifos_data_out : t_fifo_data_array;
-  signal fifos_we       : std_logic_vector(0 to C_NUM_FIFOS - 1);
-  signal fifos_re       : std_logic_vector(0 to C_NUM_FIFOS - 1);
-  signal fifos_sel      : std_logic_vector(0 to C_NUM_FIFOS - 1);
+  signal fifos_we       : std_logic_vector(C_NUM_FIFOS - 1 downto 0);
+  signal fifos_re       : std_logic_vector(C_NUM_FIFOS - 1 downto 0);
+  signal fifos_sel      : std_logic_vector(C_NUM_FIFOS - 1 downto 0);
 
   type t_preadder_signals_array is array (0 to C_MAX_RADIX - 1) of t_cmplx;
   signal preadder_inputs  : t_preadder_signals_array;
@@ -224,7 +223,6 @@ begin
     output_mux_out <= fifos_data_out(0) when output_mux_sel = "0" else preadder_outputs(0);
   end generate GEN_MUX_OUTPUT_2;
 
-  config_radix <= std_logic_vector(to_unsigned(2, clogb2(C_MAX_RADIX)));
   config_delay <= std_logic_vector(to_unsigned(C_DELAY_CNT, clogb2(C_DELAY_CNT)));
   PHASE_DELAY_GEN_INST: entity work.mr_fft_phase_delay_gen
     generic map (
@@ -236,7 +234,7 @@ begin
       i_clk => i_clk,
       i_reset => i_reset,
 
-      i_config_radix => config_radix,
+      i_config_radix => std_logic_vector(to_unsigned(i_config.radix, clogb2(C_MAX_RADIX))),
       i_config_delay => config_delay,
       i_en => '1',
 
@@ -270,13 +268,12 @@ begin
         i_clk => i_clk,
         i_reset => i_reset,
 
+        i_config => i_config,
+
         i_phase => phase,
 
         o_config_s0 => s0,
         o_config_s1 => s1,
-
-        o_preadder_s0 => preadder_s0,
-        o_preadder_s1 => preadder_s1,
 
         o_input_demux_sel => input_demux_sel,
         o_output_mux_sel => output_mux_sel,

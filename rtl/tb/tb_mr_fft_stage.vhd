@@ -19,14 +19,14 @@ architecture sim of tb_mr_fft_stage is
 begin
   dut : entity work.mr_fft_stage
       generic map (G_CAPABILITY => 2, G_CONFIGS => CFGS)
-      port map (i_clk => clk, i_reset => reset, i_sample => (others=> (others=>'0')), i_s0 => (others=>'0'), i_s1 => '0', o_sample => open);
+      port map (i_clk => clk, i_reset => reset, i_config => CFGS(0), i_sample => (others=> (others=>'0')), o_sample => open);
   clk <= not clk after CLK_PERIOD/2 when not done else '0';
 
   process
   begin
     wait for 2*CLK_PERIOD;
     reset <= '0';
-    wait for 200*CLK_PERIOD;
+    wait for 1000*CLK_PERIOD;
     report "TB PASS -- mr_fft_stage instantiated successfully" severity note;
     done <= true;
     wait;

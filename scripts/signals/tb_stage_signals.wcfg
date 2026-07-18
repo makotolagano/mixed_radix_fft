@@ -1,0 +1,292 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<wave_config>
+   <wave_state>
+   </wave_state>
+   <db_ref_list>
+      <db_ref path="tb_mr_fft_stage_sim.wdb" id="1">
+         <top_modules>
+            <top_module name="mr_fft_pkg" />
+            <top_module name="tb_mr_fft_stage" />
+            <top_module name="twiddle_pkg" />
+         </top_modules>
+      </db_ref>
+   </db_ref_list>
+   <zoom_setting>
+      <ZoomStartTime time="0.000000 us"></ZoomStartTime>
+      <ZoomEndTime time="7.930001 us"></ZoomEndTime>
+      <Cursor1Time time="0.615000 us"></Cursor1Time>
+   </zoom_setting>
+   <column_width_setting>
+      <NameColumnWidth column_width="324"></NameColumnWidth>
+      <ValueColumnWidth column_width="159"></ValueColumnWidth>
+   </column_width_setting>
+   <WVObjectSize size="7" />
+   <wvobject type="group" fp_name="group991">
+      <obj_property name="label">stage_top_ports</obj_property>
+      <obj_property name="DisplayName">label</obj_property>
+      <wvobject type="logic" fp_name="/tb_mr_fft_stage/dut/i_clk">
+         <obj_property name="ElementShortName">i_clk</obj_property>
+         <obj_property name="ObjectShortName">i_clk</obj_property>
+      </wvobject>
+      <wvobject type="logic" fp_name="/tb_mr_fft_stage/dut/i_reset">
+         <obj_property name="ElementShortName">i_reset</obj_property>
+         <obj_property name="ObjectShortName">i_reset</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/i_config">
+         <obj_property name="ElementShortName">i_config</obj_property>
+         <obj_property name="ObjectShortName">i_config</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/i_sample">
+         <obj_property name="ElementShortName">i_sample</obj_property>
+         <obj_property name="ObjectShortName">i_sample</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/o_sample">
+         <obj_property name="ElementShortName">o_sample</obj_property>
+         <obj_property name="ObjectShortName">o_sample</obj_property>
+      </wvobject>
+   </wvobject>
+   <wvobject type="group" fp_name="group955">
+      <obj_property name="label">control</obj_property>
+      <obj_property name="DisplayName">label</obj_property>
+      <wvobject type="logic" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/i_clk">
+         <obj_property name="ElementShortName">i_clk</obj_property>
+         <obj_property name="ObjectShortName">i_clk</obj_property>
+      </wvobject>
+      <wvobject type="logic" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/i_reset">
+         <obj_property name="ElementShortName">i_reset</obj_property>
+         <obj_property name="ObjectShortName">i_reset</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/i_config">
+         <obj_property name="ElementShortName">i_config</obj_property>
+         <obj_property name="ObjectShortName">i_config</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/i_phase">
+         <obj_property name="ElementShortName">i_phase[2:0]</obj_property>
+         <obj_property name="ObjectShortName">i_phase[2:0]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/o_config_s0">
+         <obj_property name="ElementShortName">o_config_s0[1:0]</obj_property>
+         <obj_property name="ObjectShortName">o_config_s0[1:0]</obj_property>
+      </wvobject>
+      <wvobject type="logic" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/o_config_s1">
+         <obj_property name="ElementShortName">o_config_s1</obj_property>
+         <obj_property name="ObjectShortName">o_config_s1</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/o_input_demux_sel">
+         <obj_property name="ElementShortName">o_input_demux_sel[1:0]</obj_property>
+         <obj_property name="ObjectShortName">o_input_demux_sel[1:0]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/o_output_mux_sel">
+         <obj_property name="ElementShortName">o_output_mux_sel[2:0]</obj_property>
+         <obj_property name="ObjectShortName">o_output_mux_sel[2:0]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/o_fifos_we">
+         <obj_property name="ElementShortName">o_fifos_we[3:0]</obj_property>
+         <obj_property name="ObjectShortName">o_fifos_we[3:0]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/o_fifos_re">
+         <obj_property name="ElementShortName">o_fifos_re[3:0]</obj_property>
+         <obj_property name="ObjectShortName">o_fifos_re[3:0]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/o_fifos_sel">
+         <obj_property name="ElementShortName">o_fifos_sel[3:0]</obj_property>
+         <obj_property name="ObjectShortName">o_fifos_sel[3:0]</obj_property>
+         <obj_property name="isExpanded"></obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/fifos_we">
+         <obj_property name="ElementShortName">fifos_we[3:0]</obj_property>
+         <obj_property name="ObjectShortName">fifos_we[3:0]</obj_property>
+      </wvobject>
+      <wvobject type="other" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/G_CAPABILITY">
+         <obj_property name="ElementShortName">G_CAPABILITY</obj_property>
+         <obj_property name="ObjectShortName">G_CAPABILITY</obj_property>
+      </wvobject>
+      <wvobject type="other" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/G_MAX_RADIX">
+         <obj_property name="ElementShortName">G_MAX_RADIX</obj_property>
+         <obj_property name="ObjectShortName">G_MAX_RADIX</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/CONTROL_INST/C_FIFO_SEL_ONE">
+         <obj_property name="ElementShortName">C_FIFO_SEL_ONE[3:0]</obj_property>
+         <obj_property name="ObjectShortName">C_FIFO_SEL_ONE[3:0]</obj_property>
+      </wvobject>
+   </wvobject>
+   <wvobject type="group" fp_name="group985">
+      <obj_property name="label">phase_delay</obj_property>
+      <obj_property name="DisplayName">label</obj_property>
+      <wvobject type="logic" fp_name="/tb_mr_fft_stage/dut/PHASE_DELAY_GEN_INST/i_clk">
+         <obj_property name="ElementShortName">i_clk</obj_property>
+         <obj_property name="ObjectShortName">i_clk</obj_property>
+      </wvobject>
+      <wvobject type="logic" fp_name="/tb_mr_fft_stage/dut/PHASE_DELAY_GEN_INST/i_reset">
+         <obj_property name="ElementShortName">i_reset</obj_property>
+         <obj_property name="ObjectShortName">i_reset</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PHASE_DELAY_GEN_INST/i_config_radix">
+         <obj_property name="ElementShortName">i_config_radix[2:0]</obj_property>
+         <obj_property name="ObjectShortName">i_config_radix[2:0]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PHASE_DELAY_GEN_INST/i_config_delay">
+         <obj_property name="ElementShortName">i_config_delay[5:0]</obj_property>
+         <obj_property name="ObjectShortName">i_config_delay[5:0]</obj_property>
+         <obj_property name="Radix">UNSIGNEDDECRADIX</obj_property>
+      </wvobject>
+      <wvobject type="logic" fp_name="/tb_mr_fft_stage/dut/PHASE_DELAY_GEN_INST/i_en">
+         <obj_property name="ElementShortName">i_en</obj_property>
+         <obj_property name="ObjectShortName">i_en</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PHASE_DELAY_GEN_INST/o_phase">
+         <obj_property name="ElementShortName">o_phase[2:0]</obj_property>
+         <obj_property name="ObjectShortName">o_phase[2:0]</obj_property>
+         <obj_property name="Radix">UNSIGNEDDECRADIX</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PHASE_DELAY_GEN_INST/o_delay_cnt">
+         <obj_property name="ElementShortName">o_delay_cnt[5:0]</obj_property>
+         <obj_property name="ObjectShortName">o_delay_cnt[5:0]</obj_property>
+         <obj_property name="Radix">UNSIGNEDDECRADIX</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PHASE_DELAY_GEN_INST/phase_cnt">
+         <obj_property name="ElementShortName">phase_cnt[2:0]</obj_property>
+         <obj_property name="ObjectShortName">phase_cnt[2:0]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PHASE_DELAY_GEN_INST/delay_cnt">
+         <obj_property name="ElementShortName">delay_cnt[5:0]</obj_property>
+         <obj_property name="ObjectShortName">delay_cnt[5:0]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PHASE_DELAY_GEN_INST/config_radix">
+         <obj_property name="ElementShortName">config_radix[2:0]</obj_property>
+         <obj_property name="ObjectShortName">config_radix[2:0]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PHASE_DELAY_GEN_INST/config_delay">
+         <obj_property name="ElementShortName">config_delay[5:0]</obj_property>
+         <obj_property name="ObjectShortName">config_delay[5:0]</obj_property>
+      </wvobject>
+      <wvobject type="other" fp_name="/tb_mr_fft_stage/dut/PHASE_DELAY_GEN_INST/G_CAPABILITY">
+         <obj_property name="ElementShortName">G_CAPABILITY</obj_property>
+         <obj_property name="ObjectShortName">G_CAPABILITY</obj_property>
+      </wvobject>
+      <wvobject type="other" fp_name="/tb_mr_fft_stage/dut/PHASE_DELAY_GEN_INST/G_DELAY_CNT">
+         <obj_property name="ElementShortName">G_DELAY_CNT</obj_property>
+         <obj_property name="ObjectShortName">G_DELAY_CNT</obj_property>
+      </wvobject>
+      <wvobject type="other" fp_name="/tb_mr_fft_stage/dut/PHASE_DELAY_GEN_INST/G_MAX_RADIX">
+         <obj_property name="ElementShortName">G_MAX_RADIX</obj_property>
+         <obj_property name="ObjectShortName">G_MAX_RADIX</obj_property>
+      </wvobject>
+   </wvobject>
+   <wvobject type="group" fp_name="group994">
+      <obj_property name="label">input_demux</obj_property>
+      <obj_property name="DisplayName">label</obj_property>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/input_demux_out">
+         <obj_property name="ElementShortName">input_demux_out[0:3]</obj_property>
+         <obj_property name="ObjectShortName">input_demux_out[0:3]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/input_demux_sel">
+         <obj_property name="ElementShortName">input_demux_sel[1:0]</obj_property>
+         <obj_property name="ObjectShortName">input_demux_sel[1:0]</obj_property>
+      </wvobject>
+   </wvobject>
+   <wvobject type="group" fp_name="group1022">
+      <obj_property name="label">fifos</obj_property>
+      <obj_property name="DisplayName">label</obj_property>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/fifos_data_in">
+         <obj_property name="ElementShortName">fifos_data_in[0:3]</obj_property>
+         <obj_property name="ObjectShortName">fifos_data_in[0:3]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/fifos_data_out">
+         <obj_property name="ElementShortName">fifos_data_out[0:3]</obj_property>
+         <obj_property name="ObjectShortName">fifos_data_out[0:3]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/fifos_we">
+         <obj_property name="ElementShortName">fifos_we[3:0]</obj_property>
+         <obj_property name="ObjectShortName">fifos_we[3:0]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/fifos_re">
+         <obj_property name="ElementShortName">fifos_re[3:0]</obj_property>
+         <obj_property name="ObjectShortName">fifos_re[3:0]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/fifos_sel">
+         <obj_property name="ElementShortName">fifos_sel[3:0]</obj_property>
+         <obj_property name="ObjectShortName">fifos_sel[3:0]</obj_property>
+      </wvobject>
+   </wvobject>
+   <wvobject type="group" fp_name="group1003">
+      <obj_property name="label">preadder</obj_property>
+      <obj_property name="DisplayName">label</obj_property>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/preadder_inputs">
+         <obj_property name="ElementShortName">preadder_inputs[0:4]</obj_property>
+         <obj_property name="ObjectShortName">preadder_inputs[0:4]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/preadder_outputs">
+         <obj_property name="ElementShortName">preadder_outputs[0:4]</obj_property>
+         <obj_property name="ObjectShortName">preadder_outputs[0:4]</obj_property>
+      </wvobject>
+      <wvobject type="logic" fp_name="/tb_mr_fft_stage/dut/PREADDER_INST/i_clk">
+         <obj_property name="ElementShortName">i_clk</obj_property>
+         <obj_property name="ObjectShortName">i_clk</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PREADDER_INST/i_x0">
+         <obj_property name="ElementShortName">i_x0</obj_property>
+         <obj_property name="ObjectShortName">i_x0</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PREADDER_INST/i_x1">
+         <obj_property name="ElementShortName">i_x1</obj_property>
+         <obj_property name="ObjectShortName">i_x1</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PREADDER_INST/i_x2">
+         <obj_property name="ElementShortName">i_x2</obj_property>
+         <obj_property name="ObjectShortName">i_x2</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PREADDER_INST/i_x3">
+         <obj_property name="ElementShortName">i_x3</obj_property>
+         <obj_property name="ObjectShortName">i_x3</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PREADDER_INST/i_x4">
+         <obj_property name="ElementShortName">i_x4</obj_property>
+         <obj_property name="ObjectShortName">i_x4</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PREADDER_INST/i_s0">
+         <obj_property name="ElementShortName">i_s0[1:0]</obj_property>
+         <obj_property name="ObjectShortName">i_s0[1:0]</obj_property>
+      </wvobject>
+      <wvobject type="logic" fp_name="/tb_mr_fft_stage/dut/PREADDER_INST/i_s1">
+         <obj_property name="ElementShortName">i_s1</obj_property>
+         <obj_property name="ObjectShortName">i_s1</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PREADDER_INST/o_X0">
+         <obj_property name="ElementShortName">o_X0</obj_property>
+         <obj_property name="ObjectShortName">o_X0</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PREADDER_INST/o_X1">
+         <obj_property name="ElementShortName">o_X1</obj_property>
+         <obj_property name="ObjectShortName">o_X1</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PREADDER_INST/o_X2">
+         <obj_property name="ElementShortName">o_X2</obj_property>
+         <obj_property name="ObjectShortName">o_X2</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PREADDER_INST/o_X3">
+         <obj_property name="ElementShortName">o_X3</obj_property>
+         <obj_property name="ObjectShortName">o_X3</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/PREADDER_INST/o_X4">
+         <obj_property name="ElementShortName">o_X4</obj_property>
+         <obj_property name="ObjectShortName">o_X4</obj_property>
+      </wvobject>
+   </wvobject>
+   <wvobject type="group" fp_name="group997">
+      <obj_property name="label">output_mux</obj_property>
+      <obj_property name="DisplayName">label</obj_property>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/output_mux_in">
+         <obj_property name="ElementShortName">output_mux_in[0:4]</obj_property>
+         <obj_property name="ObjectShortName">output_mux_in[0:4]</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/output_mux_out">
+         <obj_property name="ElementShortName">output_mux_out</obj_property>
+         <obj_property name="ObjectShortName">output_mux_out</obj_property>
+      </wvobject>
+      <wvobject type="array" fp_name="/tb_mr_fft_stage/dut/output_mux_sel">
+         <obj_property name="ElementShortName">output_mux_sel[2:0]</obj_property>
+         <obj_property name="ObjectShortName">output_mux_sel[2:0]</obj_property>
+      </wvobject>
+   </wvobject>
+</wave_config>
