@@ -20,6 +20,11 @@ entity mr_fft_stage is
 
     i_config : in  t_config;
 
+    -- runtime delay (size/radix) for the current config. NOTE: when the value
+    -- equals 2**width it wraps to 0; the -1 compares below still work by
+    -- modular arithmetic. Delay 1 uses the FIFOs' depth-1 bypass register.
+    i_config_delay : in std_logic_vector(clogb2(get_delay_cnt(G_CONFIGS)) - 1 downto 0);
+
 		i_sample : in  t_cmplx;
 
 		o_sample : out t_cmplx
@@ -47,8 +52,22 @@ architecture rtl of mr_fft_stage is
   signal fifos_we       : std_logic_vector(C_NUM_FIFOS - 1 downto 0);
   signal fifos_re       : std_logic_vector(C_NUM_FIFOS - 1 downto 0);
   signal fifos_sel      : std_logic_vector(C_NUM_FIFOS - 1 downto 0);
+  signal fifos_full     : std_logic_vector(C_NUM_FIFOS - 1 downto 0);
+  signal fifos_empty    : std_logic_vector(C_NUM_FIFOS - 1 downto 0);
 
-  type t_preadder_signals_array is array (0 to C_MAX_RADIX - 1) of t_cmplx;
+  -- FIFOs run at a runtime "virtual" depth = config_delay; almost_full ('1'
+  -- once a FIFO holds config_delay-1 samples) gates the read enables in the
+  -- control: reads then follow writes one cycle early, occupancy stays at
+  -- config_delay-1 (never full, writes never blocked) and the registered read
+  -- output supplies the config_delay-th delay stage.
+  signal fifos_almost_full : std_logic_vector(C_NUM_FIFOS - 1 downto 0);
+  -- i_config_delay wraps to 0 when the delay equals 2**width (only possible
+  -- for the max, power-of-two delay) -> map 0 back to C_FIFO_DEPTH
+  signal config_delay_int : integer range 1 to C_FIFO_DEPTH;
+
+  -- always 5 entries: the preadder entity has 5 input/output ports regardless
+  -- of G_CAPABILITY (the unused ones are tied off / left unconnected inside it)
+  type t_preadder_signals_array is array (0 to 4) of t_cmplx;
   signal preadder_inputs  : t_preadder_signals_array;
   signal preadder_outputs : t_preadder_signals_array;
   signal preadder_input2_muxed : t_cmplx;
@@ -75,6 +94,9 @@ begin
 
   input_sample <= i_sample;
 
+  config_delay_int <= C_FIFO_DEPTH when unsigned(i_config_delay) = 0
+                      else to_integer(unsigned(i_config_delay));
+
 	GEN_FIFOS: for i in 0 to C_NUM_FIFOS - 1 generate
     FIFO_INST: entity work.mr_fft_fifo
       generic map (
@@ -83,14 +105,19 @@ begin
       port map (
         i_clk     => i_clk,
         i_reset   => i_reset,
+        i_virtual_depth => config_delay_int,
         i_wr_en   => fifos_we(i),
         i_wr_sample => fifos_data_in(i),
         i_rd_en   => fifos_re(i),
-        o_rd_sample => fifos_data_out(i)
+        o_rd_sample => fifos_data_out(i),
+        o_full => fifos_full(i),
+        o_almost_full => fifos_almost_full(i),
+        o_empty => fifos_empty(i)
       );
 
-      
+
   end generate GEN_FIFOS;
+
 
   GEN_INPUTS_TO_FIFOS: for i in 0 to C_NUM_FIFOS - 1 generate
     fifos_data_in(i) <= preadder_outputs(i+1) when fifos_sel(i) = '1' else input_demux_out(i);
@@ -126,6 +153,8 @@ begin
           input_demux_out(0) <= input_sample;
         when "1" =>
           input_demux_out(1) <= input_sample;
+        when others =>
+          input_demux_out <= (others => (others => (others => '0'))); -- Default assignment
       end case;
     end process PROC_INPUT_DEMUX;
   end generate GEN_INPUT_DEMUX_23;
@@ -135,7 +164,7 @@ begin
   end generate GEN_INPUT_DEMUX_2;
   
   GEN_PREADDER_INPUTS_235: if G_CAPABILITY = 2 generate
-    preadder_s0 <= not s0(1);
+    preadder_s0 <= '1' when s0 = "00" else '0';
     preadder_s1 <= not s1;
 
     preadder_inputs(0) <= fifos_data_out(0);
@@ -153,11 +182,16 @@ begin
     preadder_inputs(0) <= fifos_data_out(0);
     preadder_inputs(1) <= input_sample when preadder_s0 = '1' else fifos_data_out(1);
     preadder_inputs(2) <= input_sample when preadder_s0 = '0' else (others => (others => '0'));
+    preadder_inputs(3) <= (others => (others => '0'));
+    preadder_inputs(4) <= (others => (others => '0'));
   end generate GEN_PREADDER_INPUTS_23;
 
   GEN_PREADDER_INPUTS_2: if G_CAPABILITY = 0 generate
     preadder_inputs(0) <= fifos_data_out(0);
     preadder_inputs(1) <= input_sample;
+    preadder_inputs(2) <= (others => (others => '0'));
+    preadder_inputs(3) <= (others => (others => '0'));
+    preadder_inputs(4) <= (others => (others => '0'));
   end generate GEN_PREADDER_INPUTS_2;
 
   PREADDER_INST: entity work.mr_fft_preadder
@@ -215,6 +249,8 @@ begin
           output_mux_out <= fifos_data_out(1);
         when "10" =>
           output_mux_out <= preadder_outputs(0);
+        when others =>
+          output_mux_out <= (others => (others => '0')); -- Default assignment
       end case;
     end process PROC_OUTPUT;
   end generate GEN_MUX_OUTPUT_23;
@@ -223,7 +259,7 @@ begin
     output_mux_out <= fifos_data_out(0) when output_mux_sel = "0" else preadder_outputs(0);
   end generate GEN_MUX_OUTPUT_2;
 
-  config_delay <= std_logic_vector(to_unsigned(C_DELAY_CNT, clogb2(C_DELAY_CNT)));
+  config_delay <= i_config_delay;
   PHASE_DELAY_GEN_INST: entity work.mr_fft_phase_delay_gen
     generic map (
       G_CAPABILITY => G_CAPABILITY,
@@ -259,29 +295,30 @@ begin
       o_twiddle    => twiddle
     );
 
-    CONTROL_INST: entity work.mr_fft_control
-      generic map (
-        G_CAPABILITY => G_CAPABILITY,
-        G_MAX_RADIX  => C_MAX_RADIX
-      )
-      port map (
-        i_clk => i_clk,
-        i_reset => i_reset,
+  CONTROL_INST: entity work.mr_fft_control
+    generic map (
+      G_CAPABILITY => G_CAPABILITY,
+      G_MAX_RADIX  => C_MAX_RADIX
+    )
+    port map (
+      i_clk => i_clk,
+      i_reset => i_reset,
 
-        i_config => i_config,
+      i_config => i_config,
 
-        i_phase => phase,
+      i_phase => phase,
 
-        o_config_s0 => s0,
-        o_config_s1 => s1,
+      o_config_s0 => s0,
+      o_config_s1 => s1,
 
-        o_input_demux_sel => input_demux_sel,
-        o_output_mux_sel => output_mux_sel,
+      o_input_demux_sel => input_demux_sel,
+      o_output_mux_sel => output_mux_sel,
 
-        o_fifos_we => fifos_we,
-        o_fifos_re => fifos_re,
-        o_fifos_sel => fifos_sel
-      );
+      o_fifos_we => fifos_we,
+      o_fifos_re => fifos_re,
+      o_fifos_sel => fifos_sel,
+      i_fifos_almost_full => fifos_almost_full
+    );
 
   o_sample <= output_mux_out;
 

@@ -11,6 +11,10 @@ entity fifo is
 		i_clk 		: in std_logic;
 		i_reset 	: in std_logic;
 
+		-- runtime "virtual" depth: full/almost_full trip at this occupancy, so a
+		-- physically deeper FIFO behaves as one of this depth (defaults to G_DEPTH)
+		i_virtual_depth : in integer range 1 to G_DEPTH := G_DEPTH;
+
 		i_wr_en 	: in std_logic;
 		i_wr_data : in std_logic_vector(G_DATA_WIDTH-1 downto 0);
 
@@ -18,6 +22,7 @@ entity fifo is
 		o_rd_data : out std_logic_vector(G_DATA_WIDTH-1 downto 0);
 
 		o_full 		: out std_logic;
+		o_almost_full : out std_logic;  -- holds i_virtual_depth-1 samples
 		o_empty 	: out std_logic
 	);
 end entity fifo;
@@ -59,10 +64,14 @@ architecture rtl of fifo is
 	signal do_wr : std_logic;
 	signal do_rd : std_logic;
 
+	-- Registered memory read data and the virtual-depth-1 bypass register.
+	signal mem_rd_data : std_logic_vector(G_DATA_WIDTH-1 downto 0);
+	signal bypass_reg  : std_logic_vector(G_DATA_WIDTH-1 downto 0);
+
 begin
 
-	full_s  <= '1' when count = G_DEPTH else '0';
-	empty_s <= '1' when count = 0       else '0';
+	full_s  <= '1' when count >= i_virtual_depth else '0';
+	empty_s <= '1' when count = 0                else '0';
 
 	do_wr <= i_wr_en and not full_s;
 	do_rd <= i_rd_en and not empty_s;
@@ -89,7 +98,7 @@ begin
 			if i_reset = '1' then
 				rd_ptr <= (others => '0');
 			elsif do_rd = '1' then
-				o_rd_data <= fifo_mem(to_integer(rd_ptr));
+				mem_rd_data <= fifo_mem(to_integer(rd_ptr));
 				if rd_ptr = G_DEPTH-1 then
 					rd_ptr <= (others => '0');
 				else
@@ -98,6 +107,21 @@ begin
 			end if;
 		end if;
 	end process;
+
+	-- Virtual-depth-1 bypass: the memory path has a 2-cycle minimum latency
+	-- (write edge + registered read edge), so depth 1 is served by a plain
+	-- register instead. Written on raw i_wr_en (NOT do_wr): at depth 1 the
+	-- memory-path occupancy pins at virtual-full, which would block do_wr.
+	PROC_BYPASS_REG: process(i_clk)
+	begin
+		if rising_edge(i_clk) then
+			if i_wr_en = '1' then
+				bypass_reg <= i_wr_data;
+			end if;
+		end if;
+	end process;
+
+	o_rd_data <= bypass_reg when i_virtual_depth = 1 else mem_rd_data;
 
 	PROC_FIFO_COUNT: process(i_clk)
 	begin
@@ -113,6 +137,7 @@ begin
 	end process;
 
 	o_full  <= full_s;
+	o_almost_full <= '1' when count >= i_virtual_depth - 1 else '0';
 	o_empty <= empty_s;
 
 end architecture rtl;

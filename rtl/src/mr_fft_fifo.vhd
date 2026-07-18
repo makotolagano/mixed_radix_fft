@@ -14,6 +14,9 @@ entity mr_fft_fifo is
 		i_clk 		: in std_logic;
 		i_reset 	: in std_logic;
 
+		-- runtime "virtual" depth (see fifo.vhd); defaults to the physical depth
+		i_virtual_depth : in integer range 1 to G_DEPTH := G_DEPTH;
+
 		i_wr_en 	: in std_logic;
 		i_wr_sample : in t_cmplx;
 
@@ -21,6 +24,7 @@ entity mr_fft_fifo is
 		o_rd_sample : out t_cmplx;
 
 		o_full 		: out std_logic;
+		o_almost_full : out std_logic;  -- holds i_virtual_depth-1 samples
 		o_empty 	: out std_logic
 	);
 end entity mr_fft_fifo;
@@ -46,6 +50,8 @@ begin
       i_clk 		=> i_clk,
       i_reset 	=> i_reset,
 
+      i_virtual_depth => i_virtual_depth,
+
       i_wr_en 	=> i_wr_en,
       i_wr_data => input_sample,
 
@@ -53,6 +59,7 @@ begin
       o_rd_data => output_sample,
 
       o_full 		=> o_full,
+      o_almost_full => o_almost_full,
       o_empty 	=> o_empty
     );
 
