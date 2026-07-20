@@ -1,24 +1,105 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.fixed_pkg.all;
+use ieee.fixed_float_types.all;
 
 -- Custom packages
 library work;
 use work.mr_fft_pkg.all;
 
-
+-- Rotator: o_sample = i_sample * i_twiddle, bit-exact to the mr_fft_pkg "*"
+-- operator (full-precision 4-multiplier complex product, ONE final resize
+-- with wrap + round-to-nearest).
+--
+-- G_PIPELINE = false: combinational (original behavior), latency 0.
+-- G_PIPELINE = true : rotator_latency(true) = 4 register stages, placed so
+-- Vivado absorbs them into the four DSP48E1s:
+--   stage A: operand registers            -> DSP A/B input registers
+--   stage B: the four 18x18 products      -> DSP M registers
+--   stage C: full-precision sum/difference -> DSP post-adders / P registers
+--   stage D: rounded resize to the data word (fabric)
+-- The datapath free-runs (no enables); the valid bit travels alongside, so
+-- the consumer qualifies outputs exactly like the preadder pipeline.
 entity mr_fft_rotator is
+	generic (
+		G_PIPELINE : boolean := true
+	);
 	port (
+		i_clk 		: in  std_logic := '0';
+		i_reset 	: in  std_logic := '0';
+
+		i_valid 	: in  std_logic := '1';
 		i_sample 	: in  t_cmplx;
 		i_twiddle : in  t_cmplx_twiddle;
+
+		o_valid 	: out std_logic;
 		o_sample 	: out t_cmplx
 	);
 end entity mr_fft_rotator;
 
 architecture rtl of mr_fft_rotator is
 
+	-- one 18x18 product: (data int + twiddle int) ints, summed frac bits
+	subtype t_prod is sfixed(c_fxp_int_width + c_twiddle_int_width - 1
+	                         downto -(c_fxp_frac_width + c_twiddle_frac_width));
+	-- product sum/difference: one growth bit (same shape as t_cmplx_mult)
+	subtype t_prod_sum is sfixed(c_fxp_int_width + c_twiddle_int_width
+	                             downto -(c_fxp_frac_width + c_twiddle_frac_width));
+
 begin
 
-	o_sample <= i_sample * i_twiddle;
+	GEN_COMB: if not G_PIPELINE generate
+		o_sample <= i_sample * i_twiddle;
+		o_valid  <= i_valid;
+	end generate GEN_COMB;
+
+	GEN_PIPE: if G_PIPELINE generate
+		-- stage A: operand registers
+		signal a_r, b_r : sfixed(c_fxp_int_width - 1 downto -c_fxp_frac_width);
+		signal c_r, d_r : sfixed(c_twiddle_int_width - 1 downto -c_twiddle_frac_width);
+		-- stage B: products
+		signal p_ac, p_bd, p_ad, p_bc : t_prod;
+		-- stage C: full-precision components
+		signal re_full, im_full : t_prod_sum;
+		-- valid pipeline (A, B, C, D)
+		signal v : std_logic_vector(1 to 4);
+	begin
+
+		PROC_PIPE: process(i_clk)
+		begin
+			if rising_edge(i_clk) then
+				-- stage A
+				a_r <= i_sample.re;
+				b_r <= i_sample.im;
+				c_r <= i_twiddle.re;
+				d_r <= i_twiddle.im;
+
+				-- stage B: (a + jb)(c + jd) needs ac, bd, ad, bc
+				p_ac <= a_r * c_r;
+				p_bd <= b_r * d_r;
+				p_ad <= a_r * d_r;
+				p_bc <= b_r * c_r;
+
+				-- stage C: full precision, no quantization yet
+				re_full <= p_ac - p_bd;
+				im_full <= p_ad + p_bc;
+
+				-- stage D: the single wrap + round-to-nearest quantization,
+				-- identical to the mr_fft_pkg "*" operator
+				o_sample.re <= resize(re_full, o_sample.re, fixed_wrap, fixed_round);
+				o_sample.im <= resize(im_full, o_sample.im, fixed_wrap, fixed_round);
+
+				-- valid alongside
+				if i_reset = '1' then
+					v <= (others => '0');
+				else
+					v <= i_valid & v(1 to 3);
+				end if;
+			end if;
+		end process PROC_PIPE;
+
+		o_valid <= v(4);
+
+	end generate GEN_PIPE;
 
 end architecture rtl;

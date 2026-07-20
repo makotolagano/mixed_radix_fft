@@ -32,10 +32,19 @@ use work.twiddle_pkg.all;   -- t_config_arr, t_coef_rom, f_oct_*
 -- ---------------------------------------------------------------------------
 entity twiddle_rom is
     generic (
-        CONFIGS    : t_config_arr := c_stage4_cfgs;               -- all (radix,size) configs for this stage
+        CONFIGS    : t_config_arr;                                -- all (radix,size) configs for this stage
         SEL_WIDTH  : natural := 6;                    -- config_sel width (>= clog2(CONFIGS'length))
         K_WIDTH    : natural := 12;                    -- k width (>= clog2(max config size))
-        REGISTERED : boolean := true
+        REGISTERED : boolean := true;
+        -- second read register stage: Vivado absorbs it as the BRAM's optional
+        -- output register (DOA_REG=1, fast clock-to-out instead of the slow
+        -- latch output). +1 cycle read latency; only meaningful with
+        -- REGISTERED and a block-RAM table.
+        G_OUTPUT_REG : boolean := false;
+        -- Vivado rom_style for the coefficient table: inferred ROMs default to
+        -- LUTs even when large, so set "block" per instance where the table is
+        -- big (radix2/radix23 slots); keep "auto"/"distributed" for small ones
+        G_ROM_STYLE : string := "auto"
     );
     port (
         i_clk        : in  std_logic := '0';
@@ -48,7 +57,14 @@ end entity;
 architecture rtl of twiddle_rom is
     -- Flat coefficient ROM as packed std_logic_vector words (re & im) so a registered
     -- read maps to block RAM. (An array of records does not infer BRAM in Vivado.)
-    constant C_ROM  : t_slv_rom := f_oct_rom(CONFIGS);
+    -- Held in a SIGNAL with an initial value (never written): Vivado does not
+    -- reliably map reads of a CONSTANT array onto RAMB primitives. The style
+    -- comes from the ROM_STYLE generic (per instance).
+    constant C_ROM_INIT : t_slv_rom := f_oct_rom(CONFIGS);
+    signal   rom_mem    : t_slv_rom(C_ROM_INIT'range) := C_ROM_INIT;
+
+    attribute rom_style : string;
+    attribute rom_style of rom_mem : signal is G_ROM_STYLE;
     constant C_BASE : t_natarr  := f_oct_base(CONFIGS);
     constant C_NN   : t_natarr  := f_oct_N(CONFIGS);
     constant C_LVL  : t_natarr  := f_oct_level(CONFIGS);
@@ -57,12 +73,9 @@ architecture rtl of twiddle_rom is
     constant C_LO   : integer    := -c_twiddle_frac_width;
     constant C_CW   : natural    := c_twiddle_int_width + c_twiddle_frac_width;  -- bits per component
 
-    -- Block RAM inference
-    -- attribute rom_style : string;
-    -- attribute rom_style of ROM : constant is "block";
 
     -- stage 0 -> stage 1 : folded ROM address + reconstruct flags
-    signal addr      : natural range 0 to C_ROM'length-1;
+    signal addr      : natural range 0 to C_ROM_INIT'length-1;
     signal conjugate : std_logic;
     signal m         : unsigned(1 downto 0); -- unit j^m
 
@@ -70,6 +83,11 @@ architecture rtl of twiddle_rom is
     signal rom_q       : std_logic_vector(c_twiddle_word_w-1 downto 0);
     signal conjugate_q : std_logic;
     signal m_q         : unsigned(1 downto 0);
+
+    -- optional stage 1b (BRAM output register) -- pass-through when disabled
+    signal rom_q2       : std_logic_vector(c_twiddle_word_w-1 downto 0);
+    signal conjugate_q2 : std_logic;
+    signal m_q2         : unsigned(1 downto 0);
 
     -- stage 2 (reconstruct) output
     signal twiddle_c   : t_cmplx_twiddle;
@@ -115,7 +133,7 @@ begin
     read_reg_g : if REGISTERED generate
         process (i_clk) begin
             if rising_edge(i_clk) then
-                rom_q <= C_ROM(addr);
+                rom_q <= rom_mem(addr);
                 conjugate_q  <= conjugate;
                 m_q   <= m;
             end if;
@@ -123,24 +141,41 @@ begin
     end generate;
 
     read_comb_g : if not REGISTERED generate
-        rom_q <= C_ROM(addr);
+        rom_q <= rom_mem(addr);
         conjugate_q  <= conjugate;
         m_q   <= m;
     end generate;
 
+    -- ---- stage 1b: optional BRAM output register (flags travel along) ----
+    out_reg_g : if G_OUTPUT_REG generate
+        process (i_clk) begin
+            if rising_edge(i_clk) then
+                rom_q2       <= rom_q;
+                conjugate_q2 <= conjugate_q;
+                m_q2         <= m_q;
+            end if;
+        end process;
+    end generate;
+
+    out_comb_g : if not G_OUTPUT_REG generate
+        rom_q2       <= rom_q;
+        conjugate_q2 <= conjugate_q;
+        m_q2         <= m_q;
+    end generate;
+
     -- ---- stage 2 (comb): unpack the ROM word and reconstruct; drives the output directly ----
-    recon : process (rom_q, conjugate_q, m_q)
+    recon : process (rom_q2, conjugate_q2, m_q2)
         variable a, b, na, nb : sfixed(C_HI downto C_LO);
     begin
-        a := to_sfixed(rom_q(2*C_CW-1 downto C_CW), C_HI, C_LO); -- re
-        b := to_sfixed(rom_q(C_CW-1   downto  0), C_HI, C_LO);   -- im
-        if conjugate_q = '1' then -- conjugate: negate Im
+        a := to_sfixed(rom_q2(2*C_CW-1 downto C_CW), C_HI, C_LO); -- re
+        b := to_sfixed(rom_q2(C_CW-1   downto  0), C_HI, C_LO);   -- im
+        if conjugate_q2 = '1' then -- conjugate: negate Im
             b := resize(-b, C_HI, C_LO, fixed_saturate, fixed_truncate);
         end if;
         na := resize(-a, C_HI, C_LO, fixed_saturate, fixed_truncate);
         nb := resize(-b, C_HI, C_LO, fixed_saturate, fixed_truncate);
 
-        case m_q is                                              -- apply unit j^m: swapping/negation
+        case m_q2 is                                             -- apply unit j^m: swapping/negation
             when "00"   => twiddle_c.re <= a;  twiddle_c.im <= b;   --  1 : ( a,  b)
             when "01"   => twiddle_c.re <= nb; twiddle_c.im <= a;   --  j : (-b,  a)
             when "10"   => twiddle_c.re <= na; twiddle_c.im <= nb;  -- -1 : (-a, -b)

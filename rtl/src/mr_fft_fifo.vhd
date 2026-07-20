@@ -6,6 +6,8 @@ use ieee.fixed_pkg.all;
 library work;
 use work.mr_fft_pkg.all;
 
+-- Complex-sample wrapper around the show-ahead FIFO: o_rd_sample always
+-- presents the oldest sample (o_rd_valid flags it), i_rd_en pops it.
 entity mr_fft_fifo is
 	generic (
 		G_DEPTH 		 : integer := 1024
@@ -14,18 +16,14 @@ entity mr_fft_fifo is
 		i_clk 		: in std_logic;
 		i_reset 	: in std_logic;
 
-		-- runtime "virtual" depth (see fifo.vhd); defaults to the physical depth
-		i_virtual_depth : in integer range 1 to G_DEPTH := G_DEPTH;
-
 		i_wr_en 	: in std_logic;
 		i_wr_sample : in t_cmplx;
 
-		i_rd_en 	: in std_logic;
+		i_rd_en 	 : in std_logic;
 		o_rd_sample : out t_cmplx;
+		o_rd_valid : out std_logic;
 
-		o_full 		: out std_logic;
-		o_almost_full : out std_logic;  -- holds i_virtual_depth-1 samples
-		o_empty 	: out std_logic
+		o_full 		: out std_logic
 	);
 end entity mr_fft_fifo;
 
@@ -41,7 +39,7 @@ begin
   o_rd_sample.re <= to_sfixed(output_sample(C_FIFO_DATA_WIDTH - 1 downto C_FIFO_DATA_WIDTH/2), o_rd_sample.re);
   o_rd_sample.im <= to_sfixed(output_sample(C_FIFO_DATA_WIDTH/2 - 1 downto 0), o_rd_sample.im);
 
-	FIFO_INST: entity work.fifo
+	FIFO_INST: entity work.fifo_fwft
     generic map (
       G_DATA_WIDTH => C_FIFO_DATA_WIDTH,
       G_DEPTH => G_DEPTH
@@ -50,17 +48,14 @@ begin
       i_clk 		=> i_clk,
       i_reset 	=> i_reset,
 
-      i_virtual_depth => i_virtual_depth,
-
       i_wr_en 	=> i_wr_en,
       i_wr_data => input_sample,
 
-      i_rd_en 	=> i_rd_en,
-      o_rd_data => output_sample,
+      i_rd_en 	 => i_rd_en,
+      o_rd_data  => output_sample,
+      o_rd_valid => o_rd_valid,
 
-      o_full 		=> o_full,
-      o_almost_full => o_almost_full,
-      o_empty 	=> o_empty
+      o_full 		=> o_full
     );
 
 end architecture rtl;

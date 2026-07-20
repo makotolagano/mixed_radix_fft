@@ -28,7 +28,36 @@ package mr_fft_pkg is
 			size  : natural; -- twiddle size N at this stage for this config
 	end record;
 	type t_config_arr is array (natural range <>) of t_config;
-	
+
+	type t_nat_arr is array (natural range <>) of natural;
+
+	-- Supported FFT lengths are N = c_fft_size_base * 2**i * 3**j * 5**k
+	-- <= c_max_fft_size (same predicate as model/decomposition_configs.py).
+	-- Config count, slot count, per-slot capability and per-slot config
+	-- tables (see mr_fft_cfg_pkg) are all derived from these two numbers at
+	-- elaboration time -- nothing else is hand-written.
+	constant c_fft_size_base : natural := 12;
+	constant c_max_fft_size  : natural := 3300;
+
+	-- number of supported FFT lengths
+	function f_num_configs return natural;
+	-- supported FFT lengths, ascending; index = config index (i_config_sel)
+	function f_fft_sizes return t_nat_arr;
+	-- minimal slot counts for the mid-bypass pipeline layout
+	-- (docs/reconfigurable_fft_midbypass_architecture.md section 2):
+	-- radix235 = max(#5s), radix23 = max(#3s+#5s) - radix235,
+	-- radix2 = max(#2s+#3s+#5s) - radix23 - radix235
+	function f_num_r2_slots   return natural;
+	function f_num_r23_slots  return natural;
+	function f_num_r235_slots return natural;
+	function f_num_slots      return natural;
+	-- capability of a pipeline slot (G_CAPABILITY encoding: 0=radix2,
+	-- 1=radix23, 2=radix235); radix2 slots first, then radix23, then radix235
+	function f_slot_capability(slot : natural) return natural;
+	-- (radix, size) of every config at one pipeline slot; bypassed configs
+	-- get (radix=>1, size=>1). Use as G_CONFIGS of the stage at that slot.
+	function f_slot_configs(slot : natural) return t_config_arr;
+
 	type t_cmplx is record
 		re : sfixed(c_fxp_int_width-1 downto -c_fxp_frac_width);
 		im : sfixed(c_fxp_int_width-1 downto -c_fxp_frac_width);
@@ -64,6 +93,13 @@ package mr_fft_pkg is
 	function clogb2(n : integer) return integer;
 	function get_max_radix(capability : natural) return natural;
 	function get_delay_cnt(configs : t_config_arr) return natural;
+	function get_max_size(configs : t_config_arr) return natural;
+	-- preadder pipeline depth per capability (0 when not pipelined); the
+	-- stage's valid pipeline and the preadder register cuts both use this
+	function preadder_latency(capability : natural; pipelined : boolean) return natural;
+	-- rotator pipeline depth (0 when combinational); the stage's skid sizing
+	-- and the rotator register cuts both use this
+	function rotator_latency(pipelined : boolean) return natural;
 	function "+" (left, right : t_cmplx_wide) return t_cmplx_wide;
 	function "-" (left, right : t_cmplx_wide) return t_cmplx_wide;
 	function "*" (left : t_cmplx_wide; right : t_cmplx_coeff) return t_cmplx_wide;
@@ -112,291 +148,6 @@ package mr_fft_pkg is
 		im => (others => '0')
 	);
 
-	-- Slot 0: radix235  (declared radix 2/3/5)
-	constant c_stage0_cfgs : t_config_arr := (
-		 0 => (radix => 3, size =>   12),  -- N=12   depth=4
-		 1 => (radix => 3, size =>   24),  -- N=24   depth=8
-		 2 => (radix => 3, size =>   36),  -- N=36   depth=12
-		 3 => (radix => 3, size =>   48),  -- N=48   depth=16
-		 4 => (radix => 5, size =>   60),  -- N=60   depth=12
-		 5 => (radix => 3, size =>   72),  -- N=72   depth=24
-		 6 => (radix => 3, size =>   96),  -- N=96   depth=32
-		 7 => (radix => 3, size =>  108),  -- N=108  depth=36
-		 8 => (radix => 5, size =>  120),  -- N=120  depth=24
-		 9 => (radix => 3, size =>  144),  -- N=144  depth=48
-		10 => (radix => 5, size =>  180),  -- N=180  depth=36
-		11 => (radix => 3, size =>  192),  -- N=192  depth=64
-		12 => (radix => 3, size =>  216),  -- N=216  depth=72
-		13 => (radix => 5, size =>  240),  -- N=240  depth=48
-		14 => (radix => 3, size =>  288),  -- N=288  depth=96
-		15 => (radix => 5, size =>  300),  -- N=300  depth=60
-		16 => (radix => 3, size =>  324),  -- N=324  depth=108
-		17 => (radix => 5, size =>  360),  -- N=360  depth=72
-		18 => (radix => 3, size =>  384),  -- N=384  depth=128
-		19 => (radix => 3, size =>  432),  -- N=432  depth=144
-		20 => (radix => 5, size =>  480),  -- N=480  depth=96
-		21 => (radix => 5, size =>  540),  -- N=540  depth=108
-		22 => (radix => 3, size =>  576),  -- N=576  depth=192
-		23 => (radix => 5, size =>  600),  -- N=600  depth=120
-		24 => (radix => 3, size =>  648),  -- N=648  depth=216
-		25 => (radix => 5, size =>  720),  -- N=720  depth=144
-		26 => (radix => 3, size =>  768),  -- N=768  depth=256
-		27 => (radix => 3, size =>  864),  -- N=864  depth=288
-		28 => (radix => 5, size =>  900),  -- N=900  depth=180
-		29 => (radix => 5, size =>  960),  -- N=960  depth=192
-		30 => (radix => 3, size =>  972),  -- N=972  depth=324
-		31 => (radix => 5, size => 1080),  -- N=1080 depth=216
-		32 => (radix => 3, size => 1152),  -- N=1152 depth=384
-		33 => (radix => 5, size => 1200),  -- N=1200 depth=240
-		34 => (radix => 3, size => 1296),  -- N=1296 depth=432
-		35 => (radix => 5, size => 1440),  -- N=1440 depth=288
-		36 => (radix => 5, size => 1500),  -- N=1500 depth=300
-		37 => (radix => 3, size => 1536),  -- N=1536 depth=512
-		38 => (radix => 5, size => 1620),  -- N=1620 depth=324
-		39 => (radix => 3, size => 1728),  -- N=1728 depth=576
-		40 => (radix => 5, size => 1800),  -- N=1800 depth=360
-		41 => (radix => 5, size => 1920),  -- N=1920 depth=384
-		42 => (radix => 3, size => 1944),  -- N=1944 depth=648
-		43 => (radix => 5, size => 2160),  -- N=2160 depth=432
-		44 => (radix => 3, size => 2304),  -- N=2304 depth=768
-		45 => (radix => 5, size => 2400),  -- N=2400 depth=480
-		46 => (radix => 3, size => 2592),  -- N=2592 depth=864
-		47 => (radix => 5, size => 2700),  -- N=2700 depth=540
-		48 => (radix => 5, size => 2880),  -- N=2880 depth=576
-		49 => (radix => 3, size => 2916),  -- N=2916 depth=972
-		50 => (radix => 5, size => 3000),  -- N=3000 depth=600
-		51 => (radix => 3, size => 3072),  -- N=3072 depth=1024
-		52 => (radix => 5, size => 3240)   -- N=3240 depth=648
-	);
-
-	-- Slot 1: radix235  (declared radix 2/3/5)
-	constant c_stage1_cfgs : t_config_arr := (
-		 0 => (radix => 2, size =>    4),  -- N=12   depth=2
-		 1 => (radix => 2, size =>    8),  -- N=24   depth=4
-		 2 => (radix => 3, size =>   12),  -- N=36   depth=4
-		 3 => (radix => 2, size =>   16),  -- N=48   depth=8
-		 4 => (radix => 3, size =>   12),  -- N=60   depth=4
-		 5 => (radix => 3, size =>   24),  -- N=72   depth=8
-		 6 => (radix => 2, size =>   32),  -- N=96   depth=16
-		 7 => (radix => 3, size =>   36),  -- N=108  depth=12
-		 8 => (radix => 3, size =>   24),  -- N=120  depth=8
-		 9 => (radix => 3, size =>   48),  -- N=144  depth=16
-		10 => (radix => 3, size =>   36),  -- N=180  depth=12
-		11 => (radix => 2, size =>   64),  -- N=192  depth=32
-		12 => (radix => 3, size =>   72),  -- N=216  depth=24
-		13 => (radix => 3, size =>   48),  -- N=240  depth=16
-		14 => (radix => 3, size =>   96),  -- N=288  depth=32
-		15 => (radix => 5, size =>   60),  -- N=300  depth=12
-		16 => (radix => 3, size =>  108),  -- N=324  depth=36
-		17 => (radix => 3, size =>   72),  -- N=360  depth=24
-		18 => (radix => 2, size =>  128),  -- N=384  depth=64
-		19 => (radix => 3, size =>  144),  -- N=432  depth=48
-		20 => (radix => 3, size =>   96),  -- N=480  depth=32
-		21 => (radix => 3, size =>  108),  -- N=540  depth=36
-		22 => (radix => 3, size =>  192),  -- N=576  depth=64
-		23 => (radix => 5, size =>  120),  -- N=600  depth=24
-		24 => (radix => 3, size =>  216),  -- N=648  depth=72
-		25 => (radix => 3, size =>  144),  -- N=720  depth=48
-		26 => (radix => 2, size =>  256),  -- N=768  depth=128
-		27 => (radix => 3, size =>  288),  -- N=864  depth=96
-		28 => (radix => 5, size =>  180),  -- N=900  depth=36
-		29 => (radix => 3, size =>  192),  -- N=960  depth=64
-		30 => (radix => 3, size =>  324),  -- N=972  depth=108
-		31 => (radix => 3, size =>  216),  -- N=1080 depth=72
-		32 => (radix => 3, size =>  384),  -- N=1152 depth=128
-		33 => (radix => 5, size =>  240),  -- N=1200 depth=48
-		34 => (radix => 3, size =>  432),  -- N=1296 depth=144
-		35 => (radix => 3, size =>  288),  -- N=1440 depth=96
-		36 => (radix => 5, size =>  300),  -- N=1500 depth=60
-		37 => (radix => 2, size =>  512),  -- N=1536 depth=256
-		38 => (radix => 3, size =>  324),  -- N=1620 depth=108
-		39 => (radix => 3, size =>  576),  -- N=1728 depth=192
-		40 => (radix => 5, size =>  360),  -- N=1800 depth=72
-		41 => (radix => 3, size =>  384),  -- N=1920 depth=128
-		42 => (radix => 3, size =>  648),  -- N=1944 depth=216
-		43 => (radix => 3, size =>  432),  -- N=2160 depth=144
-		44 => (radix => 3, size =>  768),  -- N=2304 depth=256
-		45 => (radix => 5, size =>  480),  -- N=2400 depth=96
-		46 => (radix => 3, size =>  864),  -- N=2592 depth=288
-		47 => (radix => 5, size =>  540),  -- N=2700 depth=108
-		48 => (radix => 3, size =>  576),  -- N=2880 depth=192
-		49 => (radix => 3, size =>  972),  -- N=2916 depth=324
-		50 => (radix => 5, size =>  600),  -- N=3000 depth=120
-		51 => (radix => 2, size => 1024),  -- N=3072 depth=512
-		52 => (radix => 3, size =>  648)   -- N=3240 depth=216
-	);
-
-	-- Slot 2: radix235  (declared radix 2/3/5)
-	constant c_stage2_cfgs : t_config_arr := (
-		 0 => (radix => 2, size =>    2),  -- N=12   depth=1
-		 1 => (radix => 2, size =>    4),  -- N=24   depth=2
-		 2 => (radix => 2, size =>    4),  -- N=36   depth=2
-		 3 => (radix => 2, size =>    8),  -- N=48   depth=4
-		 4 => (radix => 2, size =>    4),  -- N=60   depth=2
-		 5 => (radix => 2, size =>    8),  -- N=72   depth=4
-		 6 => (radix => 2, size =>   16),  -- N=96   depth=8
-		 7 => (radix => 3, size =>   12),  -- N=108  depth=4
-		 8 => (radix => 2, size =>    8),  -- N=120  depth=4
-		 9 => (radix => 2, size =>   16),  -- N=144  depth=8
-		10 => (radix => 3, size =>   12),  -- N=180  depth=4
-		11 => (radix => 2, size =>   32),  -- N=192  depth=16
-		12 => (radix => 3, size =>   24),  -- N=216  depth=8
-		13 => (radix => 2, size =>   16),  -- N=240  depth=8
-		14 => (radix => 2, size =>   32),  -- N=288  depth=16
-		15 => (radix => 3, size =>   12),  -- N=300  depth=4
-		16 => (radix => 3, size =>   36),  -- N=324  depth=12
-		17 => (radix => 3, size =>   24),  -- N=360  depth=8
-		18 => (radix => 2, size =>   64),  -- N=384  depth=32
-		19 => (radix => 3, size =>   48),  -- N=432  depth=16
-		20 => (radix => 2, size =>   32),  -- N=480  depth=16
-		21 => (radix => 3, size =>   36),  -- N=540  depth=12
-		22 => (radix => 2, size =>   64),  -- N=576  depth=32
-		23 => (radix => 3, size =>   24),  -- N=600  depth=8
-		24 => (radix => 3, size =>   72),  -- N=648  depth=24
-		25 => (radix => 3, size =>   48),  -- N=720  depth=16
-		26 => (radix => 2, size =>  128),  -- N=768  depth=64
-		27 => (radix => 3, size =>   96),  -- N=864  depth=32
-		28 => (radix => 3, size =>   36),  -- N=900  depth=12
-		29 => (radix => 2, size =>   64),  -- N=960  depth=32
-		30 => (radix => 3, size =>  108),  -- N=972  depth=36
-		31 => (radix => 3, size =>   72),  -- N=1080 depth=24
-		32 => (radix => 2, size =>  128),  -- N=1152 depth=64
-		33 => (radix => 3, size =>   48),  -- N=1200 depth=16
-		34 => (radix => 3, size =>  144),  -- N=1296 depth=48
-		35 => (radix => 3, size =>   96),  -- N=1440 depth=32
-		36 => (radix => 5, size =>   60),  -- N=1500 depth=12
-		37 => (radix => 2, size =>  256),  -- N=1536 depth=128
-		38 => (radix => 3, size =>  108),  -- N=1620 depth=36
-		39 => (radix => 3, size =>  192),  -- N=1728 depth=64
-		40 => (radix => 3, size =>   72),  -- N=1800 depth=24
-		41 => (radix => 2, size =>  128),  -- N=1920 depth=64
-		42 => (radix => 3, size =>  216),  -- N=1944 depth=72
-		43 => (radix => 3, size =>  144),  -- N=2160 depth=48
-		44 => (radix => 2, size =>  256),  -- N=2304 depth=128
-		45 => (radix => 3, size =>   96),  -- N=2400 depth=32
-		46 => (radix => 3, size =>  288),  -- N=2592 depth=96
-		47 => (radix => 3, size =>  108),  -- N=2700 depth=36
-		48 => (radix => 3, size =>  192),  -- N=2880 depth=64
-		49 => (radix => 3, size =>  324),  -- N=2916 depth=108
-		50 => (radix => 5, size =>  120),  -- N=3000 depth=24
-		51 => (radix => 2, size =>  512),  -- N=3072 depth=256
-		52 => (radix => 3, size =>  216)   -- N=3240 depth=72
-	);
-
-	-- Slot 3: radix23  (declared radix 2/3)
-	constant c_stage3_cfgs : t_config_arr := (
-		 0 => (radix => 1, size =>    1),  -- N=12   bypass
-		 1 => (radix => 2, size =>    2),  -- N=24   depth=1
-		 2 => (radix => 2, size =>    2),  -- N=36   depth=1
-		 3 => (radix => 2, size =>    4),  -- N=48   depth=2
-		 4 => (radix => 2, size =>    2),  -- N=60   depth=1
-		 5 => (radix => 2, size =>    4),  -- N=72   depth=2
-		 6 => (radix => 2, size =>    8),  -- N=96   depth=4
-		 7 => (radix => 2, size =>    4),  -- N=108  depth=2
-		 8 => (radix => 2, size =>    4),  -- N=120  depth=2
-		 9 => (radix => 2, size =>    8),  -- N=144  depth=4
-		10 => (radix => 2, size =>    4),  -- N=180  depth=2
-		11 => (radix => 2, size =>   16),  -- N=192  depth=8
-		12 => (radix => 2, size =>    8),  -- N=216  depth=4
-		13 => (radix => 2, size =>    8),  -- N=240  depth=4
-		14 => (radix => 2, size =>   16),  -- N=288  depth=8
-		15 => (radix => 2, size =>    4),  -- N=300  depth=2
-		16 => (radix => 3, size =>   12),  -- N=324  depth=4
-		17 => (radix => 2, size =>    8),  -- N=360  depth=4
-		18 => (radix => 2, size =>   32),  -- N=384  depth=16
-		19 => (radix => 2, size =>   16),  -- N=432  depth=8
-		20 => (radix => 2, size =>   16),  -- N=480  depth=8
-		21 => (radix => 3, size =>   12),  -- N=540  depth=4
-		22 => (radix => 2, size =>   32),  -- N=576  depth=16
-		23 => (radix => 2, size =>    8),  -- N=600  depth=4
-		24 => (radix => 3, size =>   24),  -- N=648  depth=8
-		25 => (radix => 2, size =>   16),  -- N=720  depth=8
-		26 => (radix => 2, size =>   64),  -- N=768  depth=32
-		27 => (radix => 2, size =>   32),  -- N=864  depth=16
-		28 => (radix => 3, size =>   12),  -- N=900  depth=4
-		29 => (radix => 2, size =>   32),  -- N=960  depth=16
-		30 => (radix => 3, size =>   36),  -- N=972  depth=12
-		31 => (radix => 3, size =>   24),  -- N=1080 depth=8
-		32 => (radix => 2, size =>   64),  -- N=1152 depth=32
-		33 => (radix => 2, size =>   16),  -- N=1200 depth=8
-		34 => (radix => 3, size =>   48),  -- N=1296 depth=16
-		35 => (radix => 2, size =>   32),  -- N=1440 depth=16
-		36 => (radix => 3, size =>   12),  -- N=1500 depth=4
-		37 => (radix => 2, size =>  128),  -- N=1536 depth=64
-		38 => (radix => 3, size =>   36),  -- N=1620 depth=12
-		39 => (radix => 2, size =>   64),  -- N=1728 depth=32
-		40 => (radix => 3, size =>   24),  -- N=1800 depth=8
-		41 => (radix => 2, size =>   64),  -- N=1920 depth=32
-		42 => (radix => 3, size =>   72),  -- N=1944 depth=24
-		43 => (radix => 3, size =>   48),  -- N=2160 depth=16
-		44 => (radix => 2, size =>  128),  -- N=2304 depth=64
-		45 => (radix => 2, size =>   32),  -- N=2400 depth=16
-		46 => (radix => 3, size =>   96),  -- N=2592 depth=32
-		47 => (radix => 3, size =>   36),  -- N=2700 depth=12
-		48 => (radix => 2, size =>   64),  -- N=2880 depth=32
-		49 => (radix => 3, size =>  108),  -- N=2916 depth=36
-		50 => (radix => 3, size =>   24),  -- N=3000 depth=8
-		51 => (radix => 2, size =>  256),  -- N=3072 depth=128
-		52 => (radix => 3, size =>   72)   -- N=3240 depth=24
-	);
-
-	-- Slot 4: radix23  (declared radix 2/3)
-	constant c_stage4_cfgs : t_config_arr := (
-		 0 => (radix => 1, size =>    1),  -- N=12   bypass
-		 1 => (radix => 1, size =>    1),  -- N=24   bypass
-		 2 => (radix => 1, size =>    1),  -- N=36   bypass
-		 3 => (radix => 2, size =>    2),  -- N=48   depth=1
-		 4 => (radix => 1, size =>    1),  -- N=60   bypass
-		 5 => (radix => 2, size =>    2),  -- N=72   depth=1
-		 6 => (radix => 2, size =>    4),  -- N=96   depth=2
-		 7 => (radix => 2, size =>    2),  -- N=108  depth=1
-		 8 => (radix => 2, size =>    2),  -- N=120  depth=1
-		 9 => (radix => 2, size =>    4),  -- N=144  depth=2
-		10 => (radix => 2, size =>    2),  -- N=180  depth=1
-		11 => (radix => 2, size =>    8),  -- N=192  depth=4
-		12 => (radix => 2, size =>    4),  -- N=216  depth=2
-		13 => (radix => 2, size =>    4),  -- N=240  depth=2
-		14 => (radix => 2, size =>    8),  -- N=288  depth=4
-		15 => (radix => 2, size =>    2),  -- N=300  depth=1
-		16 => (radix => 2, size =>    4),  -- N=324  depth=2
-		17 => (radix => 2, size =>    4),  -- N=360  depth=2
-		18 => (radix => 2, size =>   16),  -- N=384  depth=8
-		19 => (radix => 2, size =>    8),  -- N=432  depth=4
-		20 => (radix => 2, size =>    8),  -- N=480  depth=4
-		21 => (radix => 2, size =>    4),  -- N=540  depth=2
-		22 => (radix => 2, size =>   16),  -- N=576  depth=8
-		23 => (radix => 2, size =>    4),  -- N=600  depth=2
-		24 => (radix => 2, size =>    8),  -- N=648  depth=4
-		25 => (radix => 2, size =>    8),  -- N=720  depth=4
-		26 => (radix => 2, size =>   32),  -- N=768  depth=16
-		27 => (radix => 2, size =>   16),  -- N=864  depth=8
-		28 => (radix => 2, size =>    4),  -- N=900  depth=2
-		29 => (radix => 2, size =>   16),  -- N=960  depth=8
-		30 => (radix => 3, size =>   12),  -- N=972  depth=4
-		31 => (radix => 2, size =>    8),  -- N=1080 depth=4
-		32 => (radix => 2, size =>   32),  -- N=1152 depth=16
-		33 => (radix => 2, size =>    8),  -- N=1200 depth=4
-		34 => (radix => 2, size =>   16),  -- N=1296 depth=8
-		35 => (radix => 2, size =>   16),  -- N=1440 depth=8
-		36 => (radix => 2, size =>    4),  -- N=1500 depth=2
-		37 => (radix => 2, size =>   64),  -- N=1536 depth=32
-		38 => (radix => 3, size =>   12),  -- N=1620 depth=4
-		39 => (radix => 2, size =>   32),  -- N=1728 depth=16
-		40 => (radix => 2, size =>    8),  -- N=1800 depth=4
-		41 => (radix => 2, size =>   32),  -- N=1920 depth=16
-		42 => (radix => 3, size =>   24),  -- N=1944 depth=8
-		43 => (radix => 2, size =>   16),  -- N=2160 depth=8
-		44 => (radix => 2, size =>   64),  -- N=2304 depth=32
-		45 => (radix => 2, size =>   16),  -- N=2400 depth=8
-		46 => (radix => 2, size =>   32),  -- N=2592 depth=16
-		47 => (radix => 3, size =>   12),  -- N=2700 depth=4
-		48 => (radix => 2, size =>   32),  -- N=2880 depth=16
-		49 => (radix => 3, size =>   36),  -- N=2916 depth=12
-		50 => (radix => 2, size =>    8),  -- N=3000 depth=4
-		51 => (radix => 2, size =>  128),  -- N=3072 depth=64
-		52 => (radix => 3, size =>   24)   -- N=3240 depth=8
-	);
-
 
 end package mr_fft_pkg;
  
@@ -443,6 +194,221 @@ package body mr_fft_pkg is
 		end loop;
 		return (max_N/radix);
 	end function get_delay_cnt;
+
+	function get_max_size(configs : t_config_arr) return natural is
+		variable m : natural := 1;
+	begin
+		for i in configs'range loop
+			if configs(i).size > m then
+				m := configs(i).size;
+			end if;
+		end loop;
+		return m;
+	end function get_max_size;
+
+	function preadder_latency(capability : natural; pipelined : boolean) return natural is
+	begin
+		if not pipelined then
+			return 0;
+		end if;
+		case capability is
+			when 2      => return 2;  -- radix235: cut after t1 adds, after multiplies
+			when 1      => return 2;  -- radix23:  cut after t0 adds, after k6 multiply
+			when others => return 1;  -- radix2:   registered butterfly outputs
+		end case;
+	end function preadder_latency;
+
+	function rotator_latency(pipelined : boolean) return natural is
+	begin
+		if pipelined then
+			return 4;  -- operand regs, M regs, post-adder/P regs, rounding reg
+		else
+			return 0;
+		end if;
+	end function rotator_latency;
+
+	-- number of factors p in n
+	function f_count_factor(n : natural; p : natural) return natural is
+		variable v : natural := n;
+		variable c : natural := 0;
+	begin
+		while v mod p = 0 loop
+			v := v / p;
+			c := c + 1;
+		end loop;
+		return c;
+	end function f_count_factor;
+
+	function f_num_configs return natural is
+		variable n2, n3, n5 : natural;
+		variable cnt        : natural := 0;
+	begin
+		n2 := c_fft_size_base;
+		while n2 <= c_max_fft_size loop
+			n3 := n2;
+			while n3 <= c_max_fft_size loop
+				n5 := n3;
+				while n5 <= c_max_fft_size loop
+					cnt := cnt + 1;
+					n5  := n5 * 5;
+				end loop;
+				n3 := n3 * 3;
+			end loop;
+			n2 := n2 * 2;
+		end loop;
+		return cnt;
+	end function f_num_configs;
+
+	function f_fft_sizes return t_nat_arr is
+		variable sizes      : t_nat_arr(0 to f_num_configs - 1);
+		variable idx        : natural := 0;
+		variable n2, n3, n5 : natural;
+		variable tmp        : natural;
+		variable j          : natural;
+	begin
+		n2 := c_fft_size_base;
+		while n2 <= c_max_fft_size loop
+			n3 := n2;
+			while n3 <= c_max_fft_size loop
+				n5 := n3;
+				while n5 <= c_max_fft_size loop
+					sizes(idx) := n5;
+					idx        := idx + 1;
+					n5         := n5 * 5;
+				end loop;
+				n3 := n3 * 3;
+			end loop;
+			n2 := n2 * 2;
+		end loop;
+		-- insertion sort ascending: config index = rank of N (model ordering)
+		for i in 1 to sizes'high loop
+			tmp := sizes(i);
+			j   := i;
+			while j > 0 loop
+				exit when sizes(j - 1) <= tmp;
+				sizes(j) := sizes(j - 1);
+				j        := j - 1;
+			end loop;
+			sizes(j) := tmp;
+		end loop;
+		return sizes;
+	end function f_fft_sizes;
+
+	function f_num_r235_slots return natural is
+		constant sizes : t_nat_arr := f_fft_sizes;
+		variable m     : natural   := 0;
+	begin
+		for i in sizes'range loop
+			if f_count_factor(sizes(i), 5) > m then
+				m := f_count_factor(sizes(i), 5);
+			end if;
+		end loop;
+		return m;
+	end function f_num_r235_slots;
+
+	function f_num_r23_slots return natural is
+		constant sizes : t_nat_arr := f_fft_sizes;
+		variable f     : natural;
+		variable m     : natural := 0;
+	begin
+		for i in sizes'range loop
+			f := f_count_factor(sizes(i), 3) + f_count_factor(sizes(i), 5);
+			if f > m then
+				m := f;
+			end if;
+		end loop;
+		return m - f_num_r235_slots;
+	end function f_num_r23_slots;
+
+	function f_num_r2_slots return natural is
+		constant sizes : t_nat_arr := f_fft_sizes;
+		variable f     : natural;
+		variable m     : natural := 0;
+	begin
+		for i in sizes'range loop
+			f := f_count_factor(sizes(i), 2) + f_count_factor(sizes(i), 3) + f_count_factor(sizes(i), 5);
+			if f > m then
+				m := f;
+			end if;
+		end loop;
+		return m - f_num_r23_slots - f_num_r235_slots;
+	end function f_num_r2_slots;
+
+	function f_num_slots return natural is
+	begin
+		return f_num_r2_slots + f_num_r23_slots + f_num_r235_slots;
+	end function f_num_slots;
+
+	function f_slot_capability(slot : natural) return natural is
+	begin
+		if slot < f_num_r2_slots then
+			return 0;
+		elsif slot < f_num_r2_slots + f_num_r23_slots then
+			return 1;
+		else
+			return 2;
+		end if;
+	end function f_slot_capability;
+
+	-- Mid-bypass placement: each config's ascending radix list [2..][3..][5..]
+	-- goes to the earliest slot whose capability admits the radix (2: any
+	-- slot, 3: radix23/radix235, 5: radix235 only); remaining slots are
+	-- bypassed. size at a used slot is the remaining DIF sub-FFT length: the
+	-- product of the radices placed at this and all later slots.
+	function f_slot_configs(slot : natural) return t_config_arr is
+		constant sizes      : t_nat_arr := f_fft_sizes;
+		constant num_slots  : natural   := f_num_slots;
+		constant first_r23  : natural   := f_num_r2_slots;
+		constant first_r235 : natural   := f_num_r2_slots + f_num_r23_slots;
+		variable radix_at   : t_nat_arr(0 to num_slots - 1);
+		variable pos        : natural;
+		variable prod       : natural;
+		variable cfgs       : t_config_arr(0 to sizes'length - 1);
+	begin
+		assert slot < num_slots
+			report "f_slot_configs: slot " & integer'image(slot) & " out of range"
+			severity failure;
+		for c in sizes'range loop
+			radix_at := (others => 1);
+			pos      := 0;
+			for r in 1 to f_count_factor(sizes(c), 2) loop
+				radix_at(pos) := 2;
+				pos           := pos + 1;
+			end loop;
+			if pos < first_r23 then
+				pos := first_r23;
+			end if;
+			for r in 1 to f_count_factor(sizes(c), 3) loop
+				radix_at(pos) := 3;
+				pos           := pos + 1;
+			end loop;
+			if pos < first_r235 then
+				pos := first_r235;
+			end if;
+			for r in 1 to f_count_factor(sizes(c), 5) loop
+				radix_at(pos) := 5;
+				pos           := pos + 1;
+			end loop;
+			-- remaining sub-FFT length seen at `slot` (bypass slots contribute 1)
+			prod := 1;
+			for s in num_slots - 1 downto slot loop
+				prod := prod * radix_at(s);
+			end loop;
+			if radix_at(slot) = 1 then
+				cfgs(c) := (radix => 1, size => 1);
+			else
+				cfgs(c) := (radix => radix_at(slot), size => prod);
+			end if;
+			-- self-check: the placed radices must multiply back to N
+			for s in slot - 1 downto 0 loop
+				prod := prod * radix_at(s);
+			end loop;
+			assert prod = sizes(c)
+				report "f_slot_configs: placement does not decompose N=" & integer'image(sizes(c))
+				severity failure;
+		end loop;
+		return cfgs;
+	end function f_slot_configs;
 
 	function "+" (left, right : t_cmplx_wide) return t_cmplx_wide is
     variable result : t_cmplx_wide;
