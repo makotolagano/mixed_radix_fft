@@ -13,7 +13,7 @@ entity mr_fft_stage_synth is
     i_reset : in  std_logic;
     i_config : in t_config;
     i_config_sel : in std_logic_vector(clogb2(c_num_configs) - 1 downto 0);
-    i_config_delay : in std_logic_vector(clogb2(get_delay_cnt(c_slot_cfgs(c_num_r2_slots + c_num_r23_slots))) - 1 downto 0);
+    i_config_delay : in std_logic_vector(clogb2(get_delay_cnt(c_slot_cfgs(f_num_r2_slots + f_num_r23_slots))) - 1 downto 0);
     i_sample : in  t_cmplx;
     i_valid  : in  std_logic;
     o_ready  : out std_logic;
@@ -24,7 +24,7 @@ entity mr_fft_stage_synth is
 end entity;
 
 architecture rtl of mr_fft_stage_synth is
-  constant C_SLOT : natural := c_num_r2_slots + c_num_r23_slots;  -- first radix235 slot
+  constant C_SLOT : natural := f_num_r2_slots + f_num_r23_slots;  -- first radix235 slot
 begin
   dut : entity work.mr_fft_stage
     generic map (G_CAPABILITY => f_slot_capability(C_SLOT), G_CONFIGS => c_slot_cfgs(C_SLOT))

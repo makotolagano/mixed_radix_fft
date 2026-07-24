@@ -11,24 +11,18 @@ use work.mr_fft_pkg.all;
 
 entity mr_fft_stage is
 	generic (
-    -- Radix capability of this stage: 0=radix2, 1=radix23, 2=radix235
 		G_CAPABILITY : natural := 2;
-
-    -- The stage's supported FFT configs: (radix, stage_FFT_size_N) per config
     G_CONFIGS : t_config_arr;
-    
-    -- Pipeline the preadder (with preadder_latency registers):
-    -- * There's a shift register for valid (since pipeline is freerunning),
-    -- * Results land in result FIFOs.
-    -- (Ignored for G_CAPABILITY = 0: the radix-2 butterfly is one add/sub,
-    -- X1 written back into the delay FIFO)
+    -- pipeline the preadder (see preadder_latency); the stage compensates
+    -- with a valid pipeline of the same depth, results land in result FIFOs.
+    -- Ignored for G_CAPABILITY = 0: the radix-2 butterfly is one add/sub, so
+    -- that stage stays combinational with X1 written back into the delay
+    -- FIFO (memory = 1x delay, no result FIFOs).
     G_PIPELINE : boolean := true;
-
-    -- Position of this stage in the chain: twiddle exponent for output beat
+    -- position of this stage in the chain: twiddle exponent for output beat
     -- (arm p, position k) is p*k*radix**G_STAGE_INDEX mod size
     G_STAGE_INDEX : natural := 0;
-    
-    -- rom_style for the twiddle factor ROM: set "block" for stages with big ROMs
+    -- rom_style for the twiddle table: set "block" on slots with big tables
     -- (Vivado leaves inferred ROMs in LUTs by default), "auto" elsewhere
     G_TWIDDLE_ROM_STYLE : string := "auto"
 	);
@@ -36,46 +30,58 @@ entity mr_fft_stage is
 		i_clk : in  std_logic;
     i_reset : in  std_logic;
 
-    -- Runtime configuration: select one of the stage's supported configs (radix, size)
     i_config : in  t_config;
 
-    -- Index of the current config within G_CONFIGS (selects the twiddle-ROM block);
-    -- switch it together with i_config
+    -- index of the current config within G_CONFIGS (selects the twiddle-ROM
+    -- block); switch it together with i_config
     i_config_sel : in std_logic_vector(clogb2(G_CONFIGS'length) - 1 downto 0) := (others => '0');
 
-    -- Runtime delay (size/radix) for the current config.
-    -- NOTE: when the value equals 2**width it wraps to 0; the -1 compares below still work by
+    -- runtime delay (size/radix) for the current config. NOTE: when the value
+    -- equals 2**width it wraps to 0; the -1 compares below still work by
     -- modular arithmetic.
     i_config_delay : in std_logic_vector(clogb2(get_delay_cnt(G_CONFIGS)) - 1 downto 0);
 
+    -- Reconfiguration needs NO reset: after a whole number of frames has been
+    -- fed and all outputs have been drained (output beats = input beats), the
+    -- stage sits in its reset-equivalent state -- both counter pairs wrapped
+    -- to (0,0), pending clear, FIFOs empty -- so (i_config, i_config_delay)
+    -- may then change to ANY config. Contract: don't offer the next config's
+    -- samples before switching the config, and don't switch while the final
+    -- drain is still running.
+
+    -- Input and output flows are fully DECOUPLED (separate phase/delay
+    -- counters). Delay FIFOs hold only input samples; the (pipelined)
+    -- preadder consumes them at the last (radix-1) input phase and its
+    -- results X0..X_{r-1} land in per-arm RESULT FIFOs, which the output
+    -- side drains block by block whenever the downstream is ready. The input
+    -- side never waits for i_ready -- it stalls only on space (delay FIFO
+    -- full during fill phases, result-FIFO credit at the joint phase), so
+    -- there is no combinational i_ready->o_ready or i_valid->o_valid path.
+
     -- input stream handshake
 		i_sample : in  t_cmplx;
-    i_valid  : in  std_logic;
+    i_valid  : in  std_logic := '1';
     o_ready  : out std_logic;
 
     -- output stream handshake
 		o_sample : out t_cmplx;
     o_valid  : out std_logic;
-    i_ready  : in  std_logic
+    i_ready  : in  std_logic := '1'
 	);
 end entity mr_fft_stage;
 
 architecture rtl of mr_fft_stage is
 
-  -- CONSTANTS --
   constant C_MAX_RADIX       : natural := get_max_radix(G_CAPABILITY);
   constant C_NUM_FIFOS       : natural := C_MAX_RADIX - 1; -- Number of FIFOs needed for the given capability
   constant C_FIFO_DATA_WIDTH : natural := c_fxp_word_width; -- Width of each FIFO data
   constant C_DELAY_CNT       : natural := get_delay_cnt(G_CONFIGS);    -- maximum size of the FFT after this stage
   constant C_NUM_CONFIGS     : natural := G_CONFIGS'length; -- Number of configurations
   constant C_FIFO_DEPTH      : natural := C_DELAY_CNT;    -- Depth of each delay FIFO
-
-  -- Capability 0 (radix2-only stage) preadder is never pipelined
+  -- capability 0 is never pipelined (see G_PIPELINE comment)
   constant C_PIPELINE        : boolean := G_PIPELINE and G_CAPABILITY /= 0;
-
-  -- Preadder pipeline depth; the stage's valid pipeline matches it
+  -- preadder pipeline depth; the stage's valid pipeline matches it
   constant C_PRE_LAT         : natural := preadder_latency(G_CAPABILITY, C_PIPELINE);
-
   -- Result FIFOs: one result block (delay words) plus the preadder-pipeline
   -- overlap. Depth D alone would be functionally safe (the credit counter
   -- counts in-flight words, so no overflow), but in back-to-back streaming
@@ -89,14 +95,13 @@ architecture rtl of mr_fft_stage is
   -- are dropped and the rotator degenerates to its data register.
   constant C_NEED_ROT : boolean := C_DELAY_CNT > 1;
 
-  -- Block-RAM twiddle ROMs get the BRAM output register ("HIGH_PERFORMANCE" mode)
-  -- the rotator then aligns with a second data register.
-  -- LUTRAM stages keep the 1-cycle read.
+  -- Block-RAM twiddle tables get the BRAM output register (fast clock-to-out
+  -- instead of the slow latch output); the rotator then aligns with a second
+  -- data register. LUT-ROM stages keep the 1-cycle read.
   constant C_TW_OUT_REG : boolean := G_TWIDDLE_ROM_STYLE = "block";
-
   -- twiddle arrival latency after a rot beat (ROM read + optional output reg)
-  constant C_TW_LAT     : natural := 1 + boolean'pos(C_TW_OUT_REG);
-
+  -- fold register + address register + BRAM read (+ optional BRAM output reg)
+  constant C_TW_LAT     : natural := 3 + boolean'pos(C_TW_OUT_REG);
   -- Rotator pipelining follows the raw G_PIPELINE (NOT C_PIPELINE: capability
   -- 0 keeps its combinational butterfly, but its rotator -- the big radix-2
   -- slots -- is exactly where the DSP pipeline matters).
@@ -108,22 +113,22 @@ architecture rtl of mr_fft_stage is
   constant C_POW2     : natural := 2 ** G_STAGE_INDEX;
   constant C_POW3     : natural := 3 ** G_STAGE_INDEX;
   constant C_POW5     : natural := 5 ** G_STAGE_INDEX;
-
   -- output skid after the rotator multiply: its credit gates the beats that
   -- launch words toward the output, counting everything in flight (twiddle
   -- alignment + rotator pipeline), plus margin so streaming never stalls
   constant C_SKID_DEPTH : natural := C_TW_LAT + C_ROT_LAT + 4;
 
-  -- Signals --
-  
   signal input_sample : t_cmplx;
 
   signal config_delay : std_logic_vector(clogb2(C_DELAY_CNT) - 1 downto 0);
+  -- quasi-static "delay - 1" (block-boundary compare value), registered so
+  -- the decrementer sits outside every per-beat comparison
+  signal delay_last_r : unsigned(clogb2(C_DELAY_CNT) - 1 downto 0);
 
   -- delay FIFOs: input samples only (capability 0: X1 write-back as well)
   type t_fifo_data_array is array (0 to C_NUM_FIFOS - 1) of t_cmplx;
   signal fifos_data_in  : t_fifo_data_array;
-  signal fifos_data_out : t_fifo_data_array;
+  signal fifos_data_out : t_fifo_data_array;   -- show-ahead FIFO heads
   signal fifos_we       : std_logic_vector(C_NUM_FIFOS - 1 downto 0);
   signal fifos_rd_valid : std_logic_vector(C_NUM_FIFOS - 1 downto 0);
   signal fifos_full     : std_logic_vector(C_NUM_FIFOS - 1 downto 0);
@@ -131,7 +136,7 @@ architecture rtl of mr_fft_stage is
   -- result FIFOs: butterfly outputs X0..X_{C_MAX_RADIX-1}, one per arm,
   -- written at the preadder pipeline output, drained by the output side
   type t_result_data_array is array (0 to C_MAX_RADIX - 1) of t_cmplx;
-  signal results_data_out : t_result_data_array;
+  signal results_data_out : t_result_data_array;   -- show-ahead heads
   signal results_we       : std_logic_vector(C_MAX_RADIX - 1 downto 0);
   signal results_re       : std_logic_vector(C_MAX_RADIX - 1 downto 0);
   signal results_rd_valid : std_logic_vector(C_MAX_RADIX - 1 downto 0);
@@ -155,12 +160,9 @@ architecture rtl of mr_fft_stage is
 
   signal output_mux_out : t_cmplx;   -- selected result-FIFO head
 
-  -- PHASE and DELAY counters --
-
   -- INPUT-side counters (drive the demux, FIFO writes and the preadder phase)
   signal phase : std_logic_vector(clogb2(C_MAX_RADIX) - 1 downto 0);
   signal delay_cnt : std_logic_vector(clogb2(C_DELAY_CNT) - 1 downto 0);
-
   -- OUTPUT-side counters (drive the result drain: phases 0..radix-2)
   signal out_phase : std_logic_vector(clogb2(C_MAX_RADIX) - 1 downto 0);
   signal out_delay_cnt : std_logic_vector(clogb2(C_DELAY_CNT) - 1 downto 0);
@@ -186,17 +188,15 @@ architecture rtl of mr_fft_stage is
 
   -- rotator stream (driven per flow): a rot beat launches one pre-rotation
   -- word together with its twiddle exponent (address into the octant ROM);
-  -- one cycle later the registered word is multiplied by the registered-read
-  -- ROM twiddle and lands in the output skid
+  -- the word is delayed C_TW_LAT cycles to meet the twiddle at the rotator
   signal rot_beat    : std_logic;
   signal rot_word    : t_cmplx;
   signal rot_exp     : integer range 0 to C_MAX_SIZE - 1;
   signal rot_exp_slv : std_logic_vector(C_TW_K_W - 1 downto 0);
-  signal rot_word_r  : t_cmplx;
-  signal rot_v_r     : std_logic;
-  -- second alignment stage, used when the twiddle ROM has its output register
-  signal rot_word_r2 : t_cmplx;
-  signal rot_v_r2    : std_logic;
+  -- twiddle-alignment shift register (depth = the ROM's read latency)
+  type t_rot_align is array (1 to C_TW_LAT) of t_cmplx;
+  signal rot_word_d : t_rot_align;
+  signal rot_v_d    : std_logic_vector(1 to C_TW_LAT);
 
   -- what actually enters the output skid (rotated word, or the raw word in
   -- a rotator-less delay-1-only stage)
@@ -257,33 +257,26 @@ begin
   end process PROC_OUT_CREDIT;
 
   GEN_ROT_MULT: if C_NEED_ROT generate
-    -- word/valid aligned with the twiddle's arrival (ROM read + optional
-    -- BRAM output register), then into the rotator
-    signal rot_al_word : t_cmplx;
-    signal rot_al_v    : std_logic;
   begin
+    -- word/valid delayed to meet the twiddle at the rotator (fold register +
+    -- ROM read + optional BRAM output register = C_TW_LAT cycles)
     PROC_ROT_REG: process(i_clk)
     begin
       if rising_edge(i_clk) then
         if i_reset = '1' then
-          rot_v_r  <= '0';
-          rot_v_r2 <= '0';
+          rot_v_d <= (others => '0');
         else
-          rot_v_r  <= rot_beat;
-          rot_v_r2 <= rot_v_r;
+          rot_v_d(1) <= rot_beat;
+          for i in 2 to C_TW_LAT loop
+            rot_v_d(i) <= rot_v_d(i - 1);
+          end loop;
         end if;
-        rot_word_r  <= rot_word;
-        rot_word_r2 <= rot_word_r;
+        rot_word_d(1) <= rot_word;
+        for i in 2 to C_TW_LAT loop
+          rot_word_d(i) <= rot_word_d(i - 1);
+        end loop;
       end if;
     end process PROC_ROT_REG;
-
-    GEN_TW_OREG: if C_TW_OUT_REG generate
-      rot_al_word <= rot_word_r2;
-      rot_al_v    <= rot_v_r2;
-    else generate
-      rot_al_word <= rot_word_r;
-      rot_al_v    <= rot_v_r;
-    end generate GEN_TW_OREG;
 
     ROTATOR_INST: entity work.mr_fft_rotator
       generic map (
@@ -292,8 +285,8 @@ begin
       port map (
         i_clk     => i_clk,
         i_reset   => i_reset,
-        i_valid   => rot_al_v,
-        i_sample  => rot_al_word,
+        i_valid   => rot_v_d(C_TW_LAT),
+        i_sample  => rot_word_d(C_TW_LAT),
         i_twiddle => twiddle,
         o_valid   => skid_we,
         o_sample  => skid_data
@@ -380,39 +373,64 @@ begin
     rot_word <= res_head_word;
 
     GEN_TW_EXP: if C_NEED_ROT generate
-      PROC_TW_EXP: process(i_clk)
-        variable v_pow, v_nxt : integer;
-      begin
-        if rising_edge(i_clk) then
-          if i_reset = '1' then
-            tw_exp <= 0;
-            tw_inc <= 0;    -- arm 0 steps by 0 (W = 1 for the X0 block)
-          elsif drain_beat = '1' then
-            if unsigned(out_delay_cnt) = unsigned(config_delay) - 1 then
-              -- block boundary: next block restarts at W^0 with the next
-              -- arm's step (+radix**s), wrapping to 0 after the last arm
-              case i_config.radix is
-                when 2      => v_pow := C_POW2;
-                when 3      => v_pow := C_POW3;
-                when others => v_pow := C_POW5;
-              end case;
+
+      -- stage index 0 (what the chain instantiates -- per-slot sub-sizes):
+      -- the exponent is p*k with p*k < size always (no modulo needed), and
+      -- the step IS the arm index, so the accumulator loop is one small add
+      GEN_TW_EXP_S0: if G_STAGE_INDEX = 0 generate
+        PROC_TW_EXP: process(i_clk)
+        begin
+          if rising_edge(i_clk) then
+            if i_reset = '1' then
               tw_exp <= 0;
-              if to_integer(unsigned(out_phase)) = i_config.radix - 1 then
-                tw_inc <= 0;
+            elsif drain_beat = '1' then
+              if unsigned(out_delay_cnt) = delay_last_r then
+                tw_exp <= 0;   -- block boundary: next block restarts at W^0
               else
-                tw_inc <= tw_inc + v_pow;
+                tw_exp <= tw_exp + to_integer(unsigned(out_phase));
               end if;
-            else
-              -- step < size, so one conditional subtract implements the mod
-              v_nxt := tw_exp + tw_inc;
-              if v_nxt >= i_config.size then
-                v_nxt := v_nxt - i_config.size;
-              end if;
-              tw_exp <= v_nxt;
             end if;
           end if;
-        end if;
-      end process PROC_TW_EXP;
+        end process PROC_TW_EXP;
+      end generate GEN_TW_EXP_S0;
+
+      -- later stage indices: step = arm * radix**s accumulated at block
+      -- boundaries, exponent wraps mod size (conditional subtract)
+      GEN_TW_EXP_SN: if G_STAGE_INDEX /= 0 generate
+        PROC_TW_EXP: process(i_clk)
+          variable v_pow, v_nxt : integer;
+        begin
+          if rising_edge(i_clk) then
+            if i_reset = '1' then
+              tw_exp <= 0;
+              tw_inc <= 0;    -- arm 0 steps by 0 (W = 1 for the X0 block)
+            elsif drain_beat = '1' then
+              if unsigned(out_delay_cnt) = delay_last_r then
+                -- block boundary: next block restarts at W^0 with the next
+                -- arm's step (+radix**s), wrapping to 0 after the last arm
+                case i_config.radix is
+                  when 2      => v_pow := C_POW2;
+                  when 3      => v_pow := C_POW3;
+                  when others => v_pow := C_POW5;
+                end case;
+                tw_exp <= 0;
+                if to_integer(unsigned(out_phase)) = i_config.radix - 1 then
+                  tw_inc <= 0;
+                else
+                  tw_inc <= tw_inc + v_pow;
+                end if;
+              else
+                -- step < size, so one conditional subtract implements the mod
+                v_nxt := tw_exp + tw_inc;
+                if v_nxt >= i_config.size then
+                  v_nxt := v_nxt - i_config.size;
+                end if;
+                tw_exp <= v_nxt;
+              end if;
+            end if;
+          end if;
+        end process PROC_TW_EXP;
+      end generate GEN_TW_EXP_SN;
 
       rot_exp <= tw_exp;
     end generate GEN_TW_EXP;
@@ -509,25 +527,47 @@ begin
     rot_word <= fifos_data_out(0) when pending = '1' else preadder_outputs(0);
 
     GEN_TW_EXP: if C_NEED_ROT generate
-      PROC_TW_EXP: process(i_clk)
-        variable v_nxt : integer;
-      begin
-        if rising_edge(i_clk) then
-          if i_reset = '1' then
-            tw_exp <= 0;
-          elsif drain_beat = '1' then
-            if unsigned(out_delay_cnt) = unsigned(config_delay) - 1 then
-              tw_exp <= 0;   -- block boundary: next block restarts at W^0
-            else
-              v_nxt := tw_exp + C_POW2;
-              if v_nxt >= i_config.size then
-                v_nxt := v_nxt - i_config.size;
+
+      -- stage index 0: exponent = k < size (no modulo), step 1
+      GEN_TW_EXP_S0: if G_STAGE_INDEX = 0 generate
+        PROC_TW_EXP: process(i_clk)
+        begin
+          if rising_edge(i_clk) then
+            if i_reset = '1' then
+              tw_exp <= 0;
+            elsif drain_beat = '1' then
+              if unsigned(out_delay_cnt) = delay_last_r then
+                tw_exp <= 0;   -- block boundary: next block restarts at W^0
+              else
+                tw_exp <= tw_exp + 1;
               end if;
-              tw_exp <= v_nxt;
             end if;
           end if;
-        end if;
-      end process PROC_TW_EXP;
+        end process PROC_TW_EXP;
+      end generate GEN_TW_EXP_S0;
+
+      -- later stage indices: step 2**s, exponent wraps mod size
+      GEN_TW_EXP_SN: if G_STAGE_INDEX /= 0 generate
+        PROC_TW_EXP: process(i_clk)
+          variable v_nxt : integer;
+        begin
+          if rising_edge(i_clk) then
+            if i_reset = '1' then
+              tw_exp <= 0;
+            elsif drain_beat = '1' then
+              if unsigned(out_delay_cnt) = delay_last_r then
+                tw_exp <= 0;   -- block boundary: next block restarts at W^0
+              else
+                v_nxt := tw_exp + C_POW2;
+                if v_nxt >= i_config.size then
+                  v_nxt := v_nxt - i_config.size;
+                end if;
+                tw_exp <= v_nxt;
+              end if;
+            end if;
+          end if;
+        end process PROC_TW_EXP;
+      end generate GEN_TW_EXP_SN;
 
       rot_exp <= tw_exp when pending = '1' else 0;
     end generate GEN_TW_EXP;
@@ -538,10 +578,10 @@ begin
         if i_reset = '1' then
           pending <= '0';
         elsif joint_beat = '1' and
-              unsigned(delay_cnt) = unsigned(config_delay) - 1 then
+              unsigned(delay_cnt) = delay_last_r then
           pending <= '1';   -- butterfly frame complete, X1 block stored
         elsif drain_beat = '1' and
-              unsigned(out_delay_cnt) = unsigned(config_delay) - 1 then
+              unsigned(out_delay_cnt) = delay_last_r then
           pending <= '0';   -- X1 block drained
         end if;
       end if;
@@ -694,6 +734,13 @@ begin
     );
 
   config_delay <= i_config_delay;
+
+  PROC_DELAY_LAST: process(i_clk)
+  begin
+    if rising_edge(i_clk) then
+      delay_last_r <= unsigned(config_delay) - 1;
+    end if;
+  end process PROC_DELAY_LAST;
 
   -- input-side counters: advance on accepted input samples
   IN_PHASE_DELAY_GEN_INST: entity work.mr_fft_phase_delay_gen

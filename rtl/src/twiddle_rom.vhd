@@ -74,10 +74,27 @@ architecture rtl of twiddle_rom is
     constant C_CW   : natural    := c_twiddle_int_width + c_twiddle_frac_width;  -- bits per component
 
 
-    -- stage 0 -> stage 1 : folded ROM address + reconstruct flags
+    -- per-config fold parameters, registered when REGISTERED (i_config_sel
+    -- is quasi-static, so the 53-entry table reads leave the per-beat path)
+    signal base_p          : natural range 0 to C_ROM_INIT'length-1;
+    signal lvl_p           : natural range 1 to 3;
+    signal n_p, n2_p, n4_p : unsigned(C_WW-1 downto 0);
+
+    -- stage 0a (conjugate + quarter folds) -> stage 0b
+    signal r1, r1_s    : unsigned(C_WW-1 downto 0);
+    signal conj1, conj1_s : std_logic;
+    signal m1, m1_s    : unsigned(1 downto 0);
+
+    -- stage 0b -> stage 0c : folded ROM address + reconstruct flags
     signal addr      : natural range 0 to C_ROM_INIT'length-1;
     signal conjugate : std_logic;
     signal m         : unsigned(1 downto 0); -- unit j^m
+
+    -- stage 0c (address register) -> stage 1: the read cycle then holds no
+    -- logic, only the register -> BRAM routing + address setup
+    signal addr_r : natural range 0 to C_ROM_INIT'length-1;
+    signal conj_b : std_logic;
+    signal m_b    : unsigned(1 downto 0);
 
     -- stage 1 (ROM read) outputs -- the single register when REGISTERED = true
     signal rom_q       : std_logic_vector(c_twiddle_word_w-1 downto 0);
@@ -93,57 +110,134 @@ architecture rtl of twiddle_rom is
     signal twiddle_c   : t_cmplx_twiddle;
 begin
 
-    -- ---- stage 0 (comb): fold k -> ROM address, carry conj/unit flags ----
-    fold : process (i_config_sel, i_k)
-        variable v_sel, v_base_a, v_lv : natural;
-        variable v_N, v_N2, v_N4, v_r    : unsigned(C_WW-1 downto 0);
-        variable v_m               : unsigned(1 downto 0);         -- unit j^m; +k wraps mod 4
-        variable v_conjugate       : std_logic;
-    begin
-        v_sel    := to_integer(unsigned(i_config_sel));
-        v_base_a := C_BASE(v_sel);
-        v_lv     := C_LVL(v_sel);
-        v_N      := to_unsigned(C_NN(v_sel), C_WW);
-        v_N2     := shift_right(v_N, 1);                             -- N/2
-        v_N4     := shift_right(v_N, 2);                             -- N/4
+    -- ---- per-config fold parameters (table reads off the per-beat path) ----
+    params_reg_g : if REGISTERED generate
+        process (i_clk)
+            variable v_sel : natural;
+            variable v_N   : unsigned(C_WW-1 downto 0);
+        begin
+            if rising_edge(i_clk) then
+                v_sel  := to_integer(unsigned(i_config_sel));
+                v_N    := to_unsigned(C_NN(v_sel), C_WW);
+                base_p <= C_BASE(v_sel);
+                lvl_p  <= C_LVL(v_sel);
+                n_p    <= v_N;
+                n2_p   <= shift_right(v_N, 1);                       -- N/2
+                n4_p   <= shift_right(v_N, 2);                       -- N/4
+            end if;
+        end process;
+    end generate;
 
-        v_r  := resize(unsigned(i_k), C_WW);                           -- k < N by construction
+    params_comb_g : if not REGISTERED generate
+        process (i_config_sel)
+            variable v_sel : natural;
+            variable v_N   : unsigned(C_WW-1 downto 0);
+        begin
+            v_sel  := to_integer(unsigned(i_config_sel));
+            v_N    := to_unsigned(C_NN(v_sel), C_WW);
+            base_p <= C_BASE(v_sel);
+            lvl_p  <= C_LVL(v_sel);
+            n_p    <= v_N;
+            n2_p   <= shift_right(v_N, 1);
+            n4_p   <= shift_right(v_N, 2);
+        end process;
+    end generate;
+
+    -- ---- stage 0a (comb): conjugate + quarter folds ----
+    fold_a : process (i_k, n_p, n2_p, lvl_p)
+        variable v_r         : unsigned(C_WW-1 downto 0);
+        variable v_m         : unsigned(1 downto 0);       -- unit j^m; +k wraps mod 4
+        variable v_conjugate : std_logic;
+    begin
+        v_r  := resize(unsigned(i_k), C_WW);                         -- k < N by construction
         v_m  := "00";
         v_conjugate := '0';
 
-        if shift_left(v_r, 1) > v_N then               -- conjugate fold
-            v_r := v_N - v_r;   v_conjugate := not v_conjugate;
+        if shift_left(v_r, 1) > n_p then               -- conjugate fold
+            v_r := n_p - v_r;   v_conjugate := not v_conjugate;
         end if;
-        if v_lv >= 2 and shift_left(v_r, 2) > v_N then -- quarter fold (t=-1)
-            v_r := v_N2 - v_r;  v_m := v_m + 2;  v_conjugate := not v_conjugate;
+        if lvl_p >= 2 and shift_left(v_r, 2) > n_p then -- quarter fold (t=-1)
+            v_r := n2_p - v_r;  v_m := v_m + 2;  v_conjugate := not v_conjugate;
         end if;
-        if v_lv >= 3 and shift_left(v_r, 3) > v_N then -- octant fold (t=-j; +j if conjugate)
-            v_r := v_N4 - v_r;
+
+        r1    <= v_r;
+        conj1 <= v_conjugate;
+        m1    <= v_m;
+    end process;
+
+    -- fold pipeline register (REGISTERED mode): splits the exponent->address
+    -- cone so the BRAM address setup path is short
+    fold_reg_g : if REGISTERED generate
+        process (i_clk) begin
+            if rising_edge(i_clk) then
+                r1_s    <= r1;
+                conj1_s <= conj1;
+                m1_s    <= m1;
+            end if;
+        end process;
+    end generate;
+
+    fold_comb_g : if not REGISTERED generate
+        r1_s    <= r1;
+        conj1_s <= conj1;
+        m1_s    <= m1;
+    end generate;
+
+    -- ---- stage 0b (comb): octant fold + base add -> ROM address ----
+    fold_b : process (r1_s, conj1_s, m1_s, n_p, n4_p, lvl_p, base_p)
+        variable v_r         : unsigned(C_WW-1 downto 0);
+        variable v_m         : unsigned(1 downto 0);
+        variable v_conjugate : std_logic;
+    begin
+        v_r         := r1_s;
+        v_m         := m1_s;
+        v_conjugate := conj1_s;
+
+        if lvl_p >= 3 and shift_left(v_r, 3) > n_p then -- octant fold (t=-j; +j if conjugate)
+            v_r := n4_p - v_r;
             if v_conjugate = '1' then v_m := v_m + 1; else v_m := v_m + 3; end if;
             v_conjugate := not v_conjugate;
         end if;
 
-        addr      <= v_base_a + to_integer(v_r);
+        addr      <= base_p + to_integer(v_r);
         conjugate <= v_conjugate;
         m         <= v_m;
     end process;
 
-    -- ---- stage 1: ROM read (the ONLY register).  Registered -> block RAM, 1-cycle latency;
+    -- ---- stage 0c: address register (REGISTERED mode) -- isolates the BRAM
+    --      address setup (or LUT-ROM decode) from the fold logic ----
+    addr_reg_g : if REGISTERED generate
+        process (i_clk) begin
+            if rising_edge(i_clk) then
+                addr_r <= addr;
+                conj_b <= conjugate;
+                m_b    <= m;
+            end if;
+        end process;
+    end generate;
+
+    addr_comb_g : if not REGISTERED generate
+        addr_r <= addr;
+        conj_b <= conjugate;
+        m_b    <= m;
+    end generate;
+
+    -- ---- stage 1: ROM read.  Registered -> block RAM, 1-cycle latency;
     --      combinational -> distributed ROM, 0 latency.  Flags travel with the ROM word.
     read_reg_g : if REGISTERED generate
         process (i_clk) begin
             if rising_edge(i_clk) then
-                rom_q <= rom_mem(addr);
-                conjugate_q  <= conjugate;
-                m_q   <= m;
+                rom_q <= rom_mem(addr_r);
+                conjugate_q  <= conj_b;
+                m_q   <= m_b;
             end if;
         end process;
     end generate;
 
     read_comb_g : if not REGISTERED generate
-        rom_q <= rom_mem(addr);
-        conjugate_q  <= conjugate;
-        m_q   <= m;
+        rom_q <= rom_mem(addr_r);
+        conjugate_q  <= conj_b;
+        m_q   <= m_b;
     end generate;
 
     -- ---- stage 1b: optional BRAM output register (flags travel along) ----
