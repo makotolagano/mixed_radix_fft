@@ -8,19 +8,37 @@ use ieee.math_real.all;
 -- Mixed Rardix FFT Package Declaration Section
 package mr_fft_pkg is
 
-	constant c_fxp_int_width 		 	 : integer := 5;
-	constant c_fxp_frac_width 		 : integer := 13;
+	-- "18 bits in memory, wide in flight" (docs/datapath_width_convention.md):
+	-- every stored/streamed word (FIFOs, BRAM, inter-stage links, DSP inputs)
+	-- is the s2.16 data word; inside the preadder the datapath is wider and
+	-- NEVER re-quantized mid-flight -- the only roundings are the half-up
+	-- product trim (prod word) and the single half-up shift+round at the
+	-- preadder exit (plus the rotator's one exit rounding). Matches the
+	-- Python model's exit_round mode (MixedRadix_PreAdder_FXP).
+	constant c_fxp_int_width 		 	 : integer := 2;
+	constant c_fxp_frac_width 		 : integer := 16;
 	constant c_fxp_word_width 		 : integer := c_fxp_int_width + c_fxp_frac_width;
 	constant c_guard_bits 				 : integer := 3;
-	-- The Python model (MixedRadix_PreAdder_FXP) quantizes ports and every
-	-- intermediate at ONE dtype (inner_type); the wide format must therefore
-	-- equal the data format to stay bit-exact with it.
-	constant c_fxp_int_wide_width  : integer := c_fxp_int_width;
-	constant c_fxp_frac_wide_width : integer := c_fxp_frac_width;
+	-- wide word (preadder adder tree, pre-multiplier): exact for ANY s2.16
+	-- inputs -- tree magnitudes stay below 10 (int 5 = +-16) and the s0
+	-- algorithmic shift (>>1/>>2) needs 2 extra fraction bits (18)
+	constant c_fxp_int_wide_width  : integer := 5;
+	constant c_fxp_frac_wide_width : integer := 18;
+	-- product word (trimmed coefficient products, t3 adds, output sums):
+	-- products trimmed half-up to 22 fraction bits; sums reach ~22.3 (int 6)
+	constant c_fxp_prod_int_width  : integer := 6;
+	constant c_fxp_prod_frac_width : integer := 22;
 	constant c_coeff_int_width 		 : integer := 2;
 	constant c_coeff_frac_width 	 : integer := 16;
 	constant c_twiddle_int_width   : integer := 2;
 	constant c_twiddle_frac_width  : integer := 16;
+	-- Datapath quantization convention, used by every resize/to_sfixed in the
+	-- arithmetic operators, the preadder and the rotator. Must match the
+	-- Python model's rounding (round-to-nearest, see model fxp conventions);
+	-- change both together or bit-exactness breaks. (The twiddle ROM's octant
+	-- negations keep their own saturate/truncate -- exact-code negation, not
+	-- data quantization.)
+	constant c_fxp_round : fixed_round_style_type := fixed_round;
 
 	-- a stage's supported FFT configs: (radix, stage_FFT_size_N) per config
 	type t_config is record
@@ -73,6 +91,11 @@ package mr_fft_pkg is
 		im : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width);
 	end record t_cmplx_coeff;
 
+	type t_cmplx_prod is record
+		re : sfixed(c_fxp_prod_int_width-1 downto -c_fxp_prod_frac_width);
+		im : sfixed(c_fxp_prod_int_width-1 downto -c_fxp_prod_frac_width);
+	end record t_cmplx_prod;
+
 	type t_cmplx_mult is record
 		re : sfixed(c_fxp_int_width+c_twiddle_int_width+1-1 downto -(c_fxp_frac_width+c_twiddle_frac_width));
 		im : sfixed(c_fxp_int_width+c_twiddle_int_width+1-1 downto -(c_fxp_frac_width+c_twiddle_frac_width));
@@ -109,7 +132,7 @@ package mr_fft_pkg is
 	function shift_right(arg : t_cmplx_wide; shift_amount : integer) return t_cmplx_wide;
 
 	constant c_k2_re : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width):=
-		to_sfixed(0.5 * (COS(MATH_2_PI / 5.0) - COS(2.0 * MATH_2_PI / 5.0)), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_round);
+		to_sfixed(0.5 * (COS(MATH_2_PI / 5.0) - COS(2.0 * MATH_2_PI / 5.0)), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, c_fxp_round);
 
 	constant c_k2 : t_cmplx_coeff := (
 		re => c_k2_re,
@@ -117,7 +140,7 @@ package mr_fft_pkg is
 	);
 
 	constant c_k3_im : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width) :=
-		to_sfixed(SIN(2.0 * MATH_2_PI / 5.0) - SIN(MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_round);
+		to_sfixed(SIN(2.0 * MATH_2_PI / 5.0) - SIN(MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, c_fxp_round);
 
 	constant c_k3 : t_cmplx_coeff := (
 		re => (others => '0'),
@@ -125,7 +148,7 @@ package mr_fft_pkg is
 	);
 
 	constant c_k4_im : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width) :=
-		to_sfixed(-SIN(2.0 * MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_round);
+		to_sfixed(-SIN(2.0 * MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, c_fxp_round);
 
 	constant c_k4 : t_cmplx_coeff := (
 		re => (others => '0'),
@@ -133,7 +156,7 @@ package mr_fft_pkg is
 	);
 
 	constant c_k5_im : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width) :=
-		to_sfixed(SIN(2.0 * MATH_2_PI / 5.0) + SIN(MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_round);
+		to_sfixed(SIN(2.0 * MATH_2_PI / 5.0) + SIN(MATH_2_PI / 5.0), c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, c_fxp_round);
 
 	constant c_k5 : t_cmplx_coeff := (
 		re => (others => '0'),
@@ -141,7 +164,7 @@ package mr_fft_pkg is
 	);
 
 	constant c_k6_re : sfixed(c_coeff_int_width-1 downto -c_coeff_frac_width) :=
-		to_sfixed(-SQRT(3.0) / 2.0, c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, fixed_round);
+		to_sfixed(-SQRT(3.0) / 2.0, c_coeff_int_width-1, -c_coeff_frac_width, fixed_wrap, c_fxp_round);
 
 	constant c_k6 : t_cmplx_coeff := (
 		re => c_k6_re,
@@ -212,8 +235,8 @@ package body mr_fft_pkg is
 			return 0;
 		end if;
 		case capability is
-			when 2      => return 2;  -- radix235: cut after t1 adds, after multiplies
-			when 1      => return 2;  -- radix23:  cut after t0 adds, after k6 multiply
+			when 2      => return 3;  -- radix235: t1 adds / raw products / round + t3 adds
+			when 1      => return 3;  -- radix23:  t0 adds / raw k6 product / round + t2 adds
 			when others => return 1;  -- radix2:   registered butterfly outputs
 		end case;
 	end function preadder_latency;
@@ -413,16 +436,16 @@ package body mr_fft_pkg is
 	function "+" (left, right : t_cmplx_wide) return t_cmplx_wide is
     variable result : t_cmplx_wide;
 	begin
-		result.re := resize(left.re + right.re, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_round);
-		result.im := resize(left.im + right.im, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_round);
+		result.re := resize(left.re + right.re, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, c_fxp_round);
+		result.im := resize(left.im + right.im, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, c_fxp_round);
 		return result;
 	end function;
 
 	function "-" (left, right : t_cmplx_wide) return t_cmplx_wide is
 		variable result : t_cmplx_wide;
 	begin
-		result.re := resize(left.re - right.re, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_round);
-		result.im := resize(left.im - right.im, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, fixed_round);
+		result.re := resize(left.re - right.re, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, c_fxp_round);
+		result.im := resize(left.im - right.im, c_fxp_int_wide_width-1, -c_fxp_frac_wide_width, fixed_wrap, c_fxp_round);
 		return result;
 	end function;
 
@@ -432,43 +455,48 @@ package body mr_fft_pkg is
 	begin
 		mult_result.re := left.re * right.re - left.im * right.im;
 		mult_result.im := left.re * right.im + left.im * right.re;
-		result.re := resize(mult_result.re, result.re, fixed_wrap, fixed_round);
-		result.im := resize(mult_result.im, result.im, fixed_wrap, fixed_round);
+		result.re := resize(mult_result.re, result.re, fixed_wrap, c_fxp_round);
+		result.im := resize(mult_result.im, result.im, fixed_wrap, c_fxp_round);
 		return result;
 	end function;
 
+	-- rotator product: full-precision 4-multiplier complex product with ONE
+	-- half-up exit rounding (+half LSB then truncate, wrap) back to the
+	-- memory word -- matches the model's rounding='half_up' rotator quantizer
 	function "*" (left : t_cmplx; right : t_cmplx_twiddle) return t_cmplx is
 		variable result 		 : t_cmplx;
 		variable mult_result : t_cmplx_mult;
+		constant c_half : sfixed(0 downto -(c_fxp_frac_width + 1)) :=
+			to_sfixed(2.0 ** (-(c_fxp_frac_width + 1)), 0, -(c_fxp_frac_width + 1));
 	begin
 		mult_result.re := left.re * right.re - left.im * right.im;
 		mult_result.im := left.re * right.im + left.im * right.re;
-		result.re := resize(mult_result.re, result.re, fixed_wrap, fixed_round);
-		result.im := resize(mult_result.im, result.im, fixed_wrap, fixed_round);
+		result.re := resize(mult_result.re + c_half, result.re, fixed_wrap, fixed_truncate);
+		result.im := resize(mult_result.im + c_half, result.im, fixed_wrap, fixed_truncate);
 		return result;
 	end function;
 
 	function resize(arg : t_cmplx; size_res : t_cmplx_wide) return t_cmplx_wide is
 		variable result : t_cmplx_wide;
 	begin
-		result.re := resize(arg.re, result.re, fixed_wrap, fixed_round);
-		result.im := resize(arg.im, result.im, fixed_wrap, fixed_round);
+		result.re := resize(arg.re, result.re, fixed_wrap, c_fxp_round);
+		result.im := resize(arg.im, result.im, fixed_wrap, c_fxp_round);
 		return result;
 	end function;
 
 	function resize(arg : t_cmplx_wide; size_res : t_cmplx) return t_cmplx is
 		variable result : t_cmplx;
 	begin
-		result.re := resize(arg.re, result.re, fixed_wrap, fixed_round);
-		result.im := resize(arg.im, result.im, fixed_wrap, fixed_round);
+		result.re := resize(arg.re, result.re, fixed_wrap, c_fxp_round);
+		result.im := resize(arg.im, result.im, fixed_wrap, c_fxp_round);
 		return result;
 	end function;
 
 	function shift_right(arg : t_cmplx_wide; shift_amount : integer) return t_cmplx_wide is
 		variable result : t_cmplx_wide;
 	begin
-		result.re := resize(shift_right(arg.re, shift_amount), result.re, fixed_wrap, fixed_round);
-		result.im := resize(shift_right(arg.im, shift_amount), result.im, fixed_wrap, fixed_round);
+		result.re := resize(shift_right(arg.re, shift_amount), result.re, fixed_wrap, c_fxp_round);
+		result.im := resize(shift_right(arg.im, shift_amount), result.im, fixed_wrap, c_fxp_round);
 		return result;
 	end function;
  

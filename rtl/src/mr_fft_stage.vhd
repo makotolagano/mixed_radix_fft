@@ -19,9 +19,6 @@ entity mr_fft_stage is
     -- that stage stays combinational with X1 written back into the delay
     -- FIFO (memory = 1x delay, no result FIFOs).
     G_PIPELINE : boolean := true;
-    -- position of this stage in the chain: twiddle exponent for output beat
-    -- (arm p, position k) is p*k*radix**G_STAGE_INDEX mod size
-    G_STAGE_INDEX : natural := 0;
     -- rom_style for the twiddle table: set "block" on slots with big tables
     -- (Vivado leaves inferred ROMs in LUTs by default), "auto" elsewhere
     G_TWIDDLE_ROM_STYLE : string := "auto"
@@ -110,9 +107,6 @@ architecture rtl of mr_fft_stage is
   -- rotator: twiddle exponent range and per-radix exponent scaling
   constant C_MAX_SIZE : natural := get_max_size(G_CONFIGS);
   constant C_TW_K_W   : natural := clogb2(C_MAX_SIZE);
-  constant C_POW2     : natural := 2 ** G_STAGE_INDEX;
-  constant C_POW3     : natural := 3 ** G_STAGE_INDEX;
-  constant C_POW5     : natural := 5 ** G_STAGE_INDEX;
   -- output skid after the rotator multiply: its credit gates the beats that
   -- launch words toward the output, counting everything in flight (twiddle
   -- alignment + rotator pipeline), plus margin so streaming never stalls
@@ -320,12 +314,10 @@ begin
   GEN_FLOW_CAP12: if G_CAPABILITY /= 0 generate
     signal res_head_valid : std_logic;
     signal res_head_word  : t_cmplx;
-    -- Twiddle exponent, double accumulator (adders only, no multiplier):
-    -- tw_inc is the current block's per-beat step (= arm*radix**s), built by
-    -- adding the constant radix**s at each block boundary; tw_exp steps by
-    -- tw_inc within the block and restarts at 0 at each block start.
+    -- Twiddle exponent p*k for output beat (arm p, position k): steps by the
+    -- arm index within a block, restarts at 0 at each block start. The config
+    -- tables carry per-slot sub-sizes, so p*k < size always -- no modulo.
     signal tw_exp : integer range 0 to C_MAX_SIZE - 1;
-    signal tw_inc : integer range 0 to C_MAX_SIZE - 1;
   begin
 
     -- output-side counters walk all radix result blocks X0..X_{r-1}
@@ -373,64 +365,20 @@ begin
     rot_word <= res_head_word;
 
     GEN_TW_EXP: if C_NEED_ROT generate
-
-      -- stage index 0 (what the chain instantiates -- per-slot sub-sizes):
-      -- the exponent is p*k with p*k < size always (no modulo needed), and
-      -- the step IS the arm index, so the accumulator loop is one small add
-      GEN_TW_EXP_S0: if G_STAGE_INDEX = 0 generate
-        PROC_TW_EXP: process(i_clk)
-        begin
-          if rising_edge(i_clk) then
-            if i_reset = '1' then
-              tw_exp <= 0;
-            elsif drain_beat = '1' then
-              if unsigned(out_delay_cnt) = delay_last_r then
-                tw_exp <= 0;   -- block boundary: next block restarts at W^0
-              else
-                tw_exp <= tw_exp + to_integer(unsigned(out_phase));
-              end if;
+      PROC_TW_EXP: process(i_clk)
+      begin
+        if rising_edge(i_clk) then
+          if i_reset = '1' then
+            tw_exp <= 0;
+          elsif drain_beat = '1' then
+            if unsigned(out_delay_cnt) = delay_last_r then
+              tw_exp <= 0;   -- block boundary: next block restarts at W^0
+            else
+              tw_exp <= tw_exp + to_integer(unsigned(out_phase));
             end if;
           end if;
-        end process PROC_TW_EXP;
-      end generate GEN_TW_EXP_S0;
-
-      -- later stage indices: step = arm * radix**s accumulated at block
-      -- boundaries, exponent wraps mod size (conditional subtract)
-      GEN_TW_EXP_SN: if G_STAGE_INDEX /= 0 generate
-        PROC_TW_EXP: process(i_clk)
-          variable v_pow, v_nxt : integer;
-        begin
-          if rising_edge(i_clk) then
-            if i_reset = '1' then
-              tw_exp <= 0;
-              tw_inc <= 0;    -- arm 0 steps by 0 (W = 1 for the X0 block)
-            elsif drain_beat = '1' then
-              if unsigned(out_delay_cnt) = delay_last_r then
-                -- block boundary: next block restarts at W^0 with the next
-                -- arm's step (+radix**s), wrapping to 0 after the last arm
-                case i_config.radix is
-                  when 2      => v_pow := C_POW2;
-                  when 3      => v_pow := C_POW3;
-                  when others => v_pow := C_POW5;
-                end case;
-                tw_exp <= 0;
-                if to_integer(unsigned(out_phase)) = i_config.radix - 1 then
-                  tw_inc <= 0;
-                else
-                  tw_inc <= tw_inc + v_pow;
-                end if;
-              else
-                -- step < size, so one conditional subtract implements the mod
-                v_nxt := tw_exp + tw_inc;
-                if v_nxt >= i_config.size then
-                  v_nxt := v_nxt - i_config.size;
-                end if;
-                tw_exp <= v_nxt;
-              end if;
-            end if;
-          end if;
-        end process PROC_TW_EXP;
-      end generate GEN_TW_EXP_SN;
+        end if;
+      end process PROC_TW_EXP;
 
       rot_exp <= tw_exp;
     end generate GEN_TW_EXP;
@@ -509,7 +457,7 @@ begin
   -- ==================================================================
   GEN_FLOW_RADIX2: if G_CAPABILITY = 0 generate
     signal pending : std_logic;   -- X1 block stored and not yet drained
-    -- twiddle exponent for the X1 block (arm 1): steps of 2**G_STAGE_INDEX
+    -- twiddle exponent for the X1 block (arm 1): k, steps of 1, k < size
     signal tw_exp  : integer range 0 to C_MAX_SIZE - 1;
   begin
 
@@ -527,47 +475,20 @@ begin
     rot_word <= fifos_data_out(0) when pending = '1' else preadder_outputs(0);
 
     GEN_TW_EXP: if C_NEED_ROT generate
-
-      -- stage index 0: exponent = k < size (no modulo), step 1
-      GEN_TW_EXP_S0: if G_STAGE_INDEX = 0 generate
-        PROC_TW_EXP: process(i_clk)
-        begin
-          if rising_edge(i_clk) then
-            if i_reset = '1' then
-              tw_exp <= 0;
-            elsif drain_beat = '1' then
-              if unsigned(out_delay_cnt) = delay_last_r then
-                tw_exp <= 0;   -- block boundary: next block restarts at W^0
-              else
-                tw_exp <= tw_exp + 1;
-              end if;
+      PROC_TW_EXP: process(i_clk)
+      begin
+        if rising_edge(i_clk) then
+          if i_reset = '1' then
+            tw_exp <= 0;
+          elsif drain_beat = '1' then
+            if unsigned(out_delay_cnt) = delay_last_r then
+              tw_exp <= 0;   -- block boundary: next block restarts at W^0
+            else
+              tw_exp <= tw_exp + 1;
             end if;
           end if;
-        end process PROC_TW_EXP;
-      end generate GEN_TW_EXP_S0;
-
-      -- later stage indices: step 2**s, exponent wraps mod size
-      GEN_TW_EXP_SN: if G_STAGE_INDEX /= 0 generate
-        PROC_TW_EXP: process(i_clk)
-          variable v_nxt : integer;
-        begin
-          if rising_edge(i_clk) then
-            if i_reset = '1' then
-              tw_exp <= 0;
-            elsif drain_beat = '1' then
-              if unsigned(out_delay_cnt) = delay_last_r then
-                tw_exp <= 0;   -- block boundary: next block restarts at W^0
-              else
-                v_nxt := tw_exp + C_POW2;
-                if v_nxt >= i_config.size then
-                  v_nxt := v_nxt - i_config.size;
-                end if;
-                tw_exp <= v_nxt;
-              end if;
-            end if;
-          end if;
-        end process PROC_TW_EXP;
-      end generate GEN_TW_EXP_SN;
+        end if;
+      end process PROC_TW_EXP;
 
       rot_exp <= tw_exp when pending = '1' else 0;
     end generate GEN_TW_EXP;

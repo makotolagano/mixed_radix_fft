@@ -35,7 +35,13 @@ begin
         for i in TESTS'range loop
             sel <= to_unsigned(TESTS(i).sel, SEL_WIDTH);
             k   <= to_unsigned(TESTS(i).k,   K_WIDTH);
-            wait until rising_edge(clk); wait until rising_edge(clk);   -- 1-cycle read + margin
+            -- params register (sel is quasi-static in the stage, not here)
+            -- + fold register + ROM read + margin
+            -- params reg + fold reg + addr reg + read + margin (sel changes
+            -- per vector here; in the stage config_sel is quasi-static)
+            wait until rising_edge(clk); wait until rising_edge(clk);
+            wait until rising_edge(clk); wait until rising_edge(clk);
+            wait until rising_edge(clk); wait until rising_edge(clk);
             gre := to_integer(signed(to_slv(tw.re)));
             gim := to_integer(signed(to_slv(tw.im)));
             if gre /= TESTS(i).re or gim /= TESTS(i).im then

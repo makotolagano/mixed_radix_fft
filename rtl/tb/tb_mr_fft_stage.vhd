@@ -147,8 +147,8 @@ begin
         -- drive this cycle's stimulus just after the rising edge
         rnd_v := lcg(rnd_v);
         rnd_r := lcg(rnd_r);
-        v := TRUE;--(rnd_v mod 4) /= 0;                    -- ~75% input valid
-        out_ready <= '1';-- when (rnd_r mod 4) /= 0 else '0';   -- ~75% ready
+        v := (rnd_v mod 4) /= 0;                    -- ~75% input valid
+        out_ready <= '1' when (rnd_r mod 4) /= 0 else '0';   -- ~75% ready
         if v then
           in_valid <= '1';
           i_sample.re <= to_fx(IN_CODES(in_ofs + 2 * in_idx));
@@ -183,7 +183,7 @@ begin
       i_sample.im <= to_fx(-21846);
       while cap_cnt < n_in loop
         rnd_r := lcg(rnd_r);
-        out_ready <= '1' ;--when (rnd_r mod 4) /= 0 else '0';
+        out_ready <= '1' when (rnd_r mod 4) /= 0 else '0';
         wait until falling_edge(clk);
         if out_valid = '1' and out_ready = '1' then
           cap_re(cap_cnt) := to_slv(o_sample.re);

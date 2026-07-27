@@ -8,8 +8,8 @@ library work;
 use work.mr_fft_pkg.all;
 
 -- Rotator: o_sample = i_sample * i_twiddle, bit-exact to the mr_fft_pkg "*"
--- operator (full-precision 4-multiplier complex product, ONE final resize
--- with wrap + round-to-nearest).
+-- operator (full-precision 4-multiplier complex product, ONE final half-up
+-- exit rounding: +half LSB then truncate, wrap).
 --
 -- G_PIPELINE = false: combinational (original behavior), latency 0.
 -- G_PIPELINE = true : rotator_latency(true) = 4 register stages, placed so
@@ -45,6 +45,9 @@ architecture rtl of mr_fft_rotator is
 	-- product sum/difference: one growth bit (same shape as t_cmplx_mult)
 	subtype t_prod_sum is sfixed(c_fxp_int_width + c_twiddle_int_width
 	                             downto -(c_fxp_frac_width + c_twiddle_frac_width));
+	-- half-up exit rounding constant: +half LSB of the memory word
+	constant c_half : sfixed(0 downto -(c_fxp_frac_width + 1)) :=
+		to_sfixed(2.0 ** (-(c_fxp_frac_width + 1)), 0, -(c_fxp_frac_width + 1));
 
 begin
 
@@ -84,10 +87,10 @@ begin
 				re_full <= p_ac - p_bd;
 				im_full <= p_ad + p_bc;
 
-				-- stage D: the single wrap + round-to-nearest quantization,
-				-- identical to the mr_fft_pkg "*" operator
-				o_sample.re <= resize(re_full, o_sample.re, fixed_wrap, fixed_round);
-				o_sample.im <= resize(im_full, o_sample.im, fixed_wrap, fixed_round);
+				-- stage D: the single wrap + half-up quantization (+half LSB
+				-- then truncate), identical to the mr_fft_pkg "*" operator
+				o_sample.re <= resize(re_full + c_half, o_sample.re, fixed_wrap, fixed_truncate);
+				o_sample.im <= resize(im_full + c_half, o_sample.im, fixed_wrap, fixed_truncate);
 
 				-- valid alongside
 				if i_reset = '1' then
