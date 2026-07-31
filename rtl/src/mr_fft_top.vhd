@@ -135,10 +135,10 @@ architecture rtl of mr_fft_top is
 
 begin
 
-    in_sample.re <= to_sfixed(i_sample(17 downto 0), in_sample.re);
-    in_sample.im <= to_sfixed(i_sample(35 downto 18), in_sample.im);
-    
-    o_sample <= C_ZERO_EXT & to_slv(out_sample.im) & to_slv(out_sample.re);
+	in_sample.re <= to_sfixed(i_sample(17 downto 0), in_sample.re);
+	in_sample.im <= to_sfixed(i_sample(35 downto 18), in_sample.im);
+	
+	o_sample <= C_ZERO_EXT & to_slv(out_sample.im) & to_slv(out_sample.re);
 
 	-- ------------------------------------------------------------------
 	-- chain + stream gating

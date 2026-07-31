@@ -1,0 +1,99 @@
+# ---------------------------------------------------------------------------
+# GHDL simulation / synthesis flow (the Vivado xsim flow lives in Makefile).
+#
+# Usage (from anywhere):
+#   make -f scripts/Makefile.ghdl sim                       run TB (default tb_mr_fft_stage)
+#   make -f scripts/Makefile.ghdl sim TB=tb_fifo
+#   make -f scripts/Makefile.ghdl sim-all                   all self-checking TBs
+#   make -f scripts/Makefile.ghdl wave TB=tb_mr_fft_stage_cap1
+#       -> writes outputs/ghdl/tb_mr_fft_stage_cap1.ghw; copy it to your
+#          machine and open with:  gtkwave tb_mr_fft_stage_cap1.ghw
+#   make -f scripts/Makefile.ghdl synth                     synthesizability check
+#   make -f scripts/Makefile.ghdl clean
+#
+# Golden vectors are generated files; regenerate after model changes with
+#   .venv/bin/python model/stage_ref.py --cap 2   (and --cap 1, --cap 0)
+#   .venv/bin/python model/chain_ref.py           (-> rtl/tb/chain_vectors.csv,
+#       read by tb_mr_fft_top at RUNTIME -- run the sim from the repo root,
+#       scripts/ or outputs/, or point generic G_VEC_FILE at the csv)
+# ---------------------------------------------------------------------------
+SCRIPT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+ROOT       := $(abspath $(SCRIPT_DIR)..)
+
+GHDL      ?= ghdl
+WORKDIR   := $(ROOT)/outputs/ghdl
+GHDL_FLAGS := --std=08 --workdir=$(WORKDIR)
+RUN_FLAGS ?= --ieee-asserts=disable
+TB        ?= tb_mr_fft_stage
+
+SRC := $(ROOT)/rtl/src
+TBD := $(ROOT)/rtl/tb
+
+# analysis order matters (packages first, leaf entities before their users)
+DESIGN_SRCS := \
+	$(SRC)/mr_fft_pkg.vhd \
+	$(SRC)/mr_fft_cfg_pkg.vhd \
+	$(SRC)/twiddle_pkg.vhd \
+	$(SRC)/twiddle_rom.vhd \
+	$(SRC)/fifo.vhd \
+	$(SRC)/fifo_fwft.vhd \
+	$(SRC)/mr_fft_fifo.vhd \
+	$(SRC)/mr_fft_preadder.vhd \
+	$(SRC)/mr_fft_rotator.vhd \
+	$(SRC)/mr_fft_phase_delay_gen.vhd \
+	$(SRC)/mr_fft_control.vhd \
+	$(SRC)/mr_fft_stage.vhd \
+	$(SRC)/mr_fft_chain.vhd \
+	$(SRC)/mr_fft_top.vhd \
+	$(SRC)/mr_fft_stage_synth.vhd
+
+# generated golden-vector packages must be analyzed before the TBs using them
+TB_SRCS := \
+	$(TBD)/twiddle_vectors_pkg.vhd \
+	$(TBD)/tb_twiddle_rom_gen.vhd \
+	$(TBD)/stage_vectors_pkg.vhd \
+	$(TBD)/stage_vectors_cap1_pkg.vhd \
+	$(TBD)/stage_vectors_cap0_pkg.vhd \
+	$(TBD)/tb_mr_fft_stage.vhd \
+	$(TBD)/tb_mr_fft_stage_cap1.vhd \
+	$(TBD)/tb_mr_fft_stage_cap0.vhd \
+	$(TBD)/tb_mr_fft_top.vhd \
+	$(TBD)/tb_fifo.vhd
+
+ALL_TBS := tb_mr_fft_stage tb_mr_fft_stage_cap1 tb_mr_fft_stage_cap0 tb_mr_fft_top tb_fifo tb_twiddle_rom_gen
+
+.PHONY: all analyze sim sim-all wave synth clean
+
+all: sim-all
+
+$(WORKDIR):
+	mkdir -p $(WORKDIR)
+
+analyze: | $(WORKDIR)
+	$(GHDL) -a $(GHDL_FLAGS) $(DESIGN_SRCS) $(TB_SRCS)
+
+sim: analyze
+	$(GHDL) --elab-run $(GHDL_FLAGS) $(TB) $(RUN_FLAGS)
+
+sim-all: analyze
+	@for tb in $(ALL_TBS); do \
+		echo "=== $$tb ==="; \
+		$(GHDL) --elab-run $(GHDL_FLAGS) $$tb $(RUN_FLAGS) || exit 1; \
+	done
+
+wave: analyze
+	$(GHDL) --elab-run $(GHDL_FLAGS) $(TB) $(RUN_FLAGS) --wave=$(WORKDIR)/$(TB).ghw
+	@echo ""
+	@echo "waveform written to: $(WORKDIR)/$(TB).ghw"
+	@echo "open with:           gtkwave $(TB).ghw"
+
+synth: analyze
+	$(GHDL) synth $(GHDL_FLAGS) --out=none mr_fft_stage_synth
+	@echo "stage synthesizability check OK"
+
+synth-chain: analyze
+	$(GHDL) synth $(GHDL_FLAGS) --out=none mr_fft_chain
+	@echo "chain synthesizability check OK"
+
+clean:
+	rm -rf $(WORKDIR)
