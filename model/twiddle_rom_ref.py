@@ -142,10 +142,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--int",  type=int, default=2,  help="c_twiddle_int_width  (default 2)")
-    ap.add_argument("--frac", type=int, default=16, help="c_twiddle_frac_width (default 16)")
+    ap.add_argument("--frac", type=int, default=15, help="c_twiddle_frac_width (default 15)")
     ap.add_argument("--configs", default="5:300,3:243,2:3072,2:12",
                     help="comma list of radix:size (default = tb_twiddle_rom set)")
-    ap.add_argument("--vhdl", default="../rtl/tb/twiddle_vectors_pkg.vhd",
+    ap.add_argument("--vhdl", default="rtl/tb/twiddle_vectors_pkg.vhd",
                     help="output VHDL package path")
     ap.add_argument("--txt",  default="tw_vectors/twiddle_rom_vectors.txt",
                     help="output plain-text vector path")

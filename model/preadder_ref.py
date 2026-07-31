@@ -1,9 +1,12 @@
 """Golden-vector generator for rtl/src/mr_fft_preadder.vhd.
 
-Runs MixedRadix_PreAdder_FXP with the RTL's fixed-point conventions
-(data s17/12, coeff s18/16, wrap overflow, floor rounding — one dtype for
-ports and datapath, matching mr_fft_pkg.vhd where wide == data format) and
-emits a self-checking VHDL package of raw two's-complement integer codes.
+Runs MixedRadix_PreAdder_FXP with the RTL's fixed-point conventions:
+"18 bits in memory, wide in flight" -- data/ports s18/16, coeff s18/16,
+wrap overflow, exit_round (internals exact, products trimmed half-up to
+internal_frac=22 fraction bits), half_up rounding, and the FIXED scaling
+schedule: the preadder applies an output right-shift derived from the radix
+mode (radix-2 -> 1, radix-3 -> 2, radix-5 -> 3) folded into the single
+half-up exit rounding. See docs/datapath_width_convention.md.
 
 Regenerate:  python model/preadder_ref.py
 Consumed by: rtl/tb/tb_mr_fft_preadder_gen.vhd
@@ -14,14 +17,15 @@ import numpy as np
 
 from mixed_radix_fft_fxp import MixedRadix_PreAdder_FXP
 
-# (G_CAPABILITY, s0, s1, model capability, valid complex outputs)
+# (G_CAPABILITY, s0, s1, model capability, valid complex outputs,
+#  scaling shift = ceil(log2(radix)) of the selected radix mode)
 CONFIGS = [
-    (2, 0, 0, 5, 5),   # radix235 hw, radix-2 mode
-    (2, 1, 0, 5, 5),   # radix235 hw, radix-3 mode
-    (2, 2, 1, 5, 5),   # radix235 hw, radix-5 mode
-    (1, 0, 0, 3, 3),   # radix23  hw, radix-2 mode
-    (1, 1, 0, 3, 3),   # radix23  hw, radix-3 mode
-    (0, 0, 0, 2, 2),   # radix2   hw
+    (2, 0, 0, 5, 5, 1),   # radix235 hw, radix-2 mode
+    (2, 1, 0, 5, 5, 2),   # radix235 hw, radix-3 mode
+    (2, 2, 1, 5, 5, 3),   # radix235 hw, radix-5 mode
+    (1, 0, 0, 3, 3, 1),   # radix23  hw, radix-2 mode
+    (1, 1, 0, 3, 3, 2),   # radix23  hw, radix-3 mode
+    (0, 0, 0, 2, 2, 1),   # radix2   hw
 ]
 
 
@@ -41,10 +45,11 @@ def corner_vectors(word_w):
     return vecs
 
 
-def run_model(cap, s0, s1, codes, data_dtype, coeff_dtype, frac_w):
-    pre = MixedRadix_PreAdder_FXP(dtype=data_dtype, shift_bits=0,
+def run_model(cap, s0, s1, shift, codes, data_dtype, coeff_dtype, frac_w, internal_frac):
+    pre = MixedRadix_PreAdder_FXP(dtype=data_dtype, shift_bits=shift,
                                   overflow='wrap', coeff_dtype=coeff_dtype,
-                                  rounding='around', capability=cap)
+                                  rounding='half_up', capability=cap,
+                                  exit_round=True, internal_frac=internal_frac)
     scale = 2.0 ** frac_w
     n_in = {5: 5, 3: 3, 2: 2}[cap]
     for i in range(n_in):
@@ -78,16 +83,17 @@ def coeff_expectations(data_dtype, coeff_dtype, coeff_frac):
     }
 
 
-def build_vectors(seed, nrand, word_w, data_dtype, coeff_dtype, frac_w):
+def build_vectors(seed, nrand, word_w, data_dtype, coeff_dtype, frac_w, internal_frac):
     rng = np.random.default_rng(seed)
     tests = []
-    for g_cap, s0, s1, cap, n_out in CONFIGS:
+    for g_cap, s0, s1, cap, n_out, shift in CONFIGS:
         stims = corner_vectors(word_w)
         stims += [list(rng.integers(-2 ** (word_w - 1), 2 ** (word_w - 1),
                                     size=10)) for _ in range(nrand)]
         for codes in stims:
             codes = [int(c) for c in codes]
-            exp = run_model(cap, s0, s1, codes, data_dtype, coeff_dtype, frac_w)
+            exp = run_model(cap, s0, s1, shift, codes, data_dtype, coeff_dtype,
+                            frac_w, internal_frac)
             tests.append((g_cap, s0, s1, n_out, codes, exp))
     return tests
 
@@ -126,8 +132,10 @@ def emit_vhdl_pkg(tests, consts, word_w, frac_w):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--int", type=int, default=5, help="c_fxp_int_width (default 5)")
-    ap.add_argument("--frac", type=int, default=12, help="c_fxp_frac_width (default 12)")
+    ap.add_argument("--int", type=int, default=2, help="c_fxp_int_width (default 2)")
+    ap.add_argument("--frac", type=int, default=16, help="c_fxp_frac_width (default 16)")
+    ap.add_argument("--internal-frac", type=int, default=22,
+                    help="product trim fraction bits (c_fxp_prod_frac_width, default 22)")
     ap.add_argument("--coeff-int", type=int, default=2, help="c_coeff_int_width (default 2)")
     ap.add_argument("--coeff-frac", type=int, default=16, help="c_coeff_frac_width (default 16)")
     ap.add_argument("--seed", type=int, default=1)
@@ -140,7 +148,8 @@ if __name__ == "__main__":
     coeff_dtype = f"fxp-s{a.coeff_int + a.coeff_frac}/{a.coeff_frac}"
 
     consts = coeff_expectations(data_dtype, coeff_dtype, a.coeff_frac)
-    tests = build_vectors(a.seed, a.nrand, word_w, data_dtype, coeff_dtype, a.frac)
+    tests = build_vectors(a.seed, a.nrand, word_w, data_dtype, coeff_dtype, a.frac,
+                          a.internal_frac)
 
     with open(a.vhdl, "w") as f:
         f.write(emit_vhdl_pkg(tests, consts, word_w, a.frac))

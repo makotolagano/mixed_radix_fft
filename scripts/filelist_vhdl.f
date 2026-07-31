@@ -1,6 +1,7 @@
 # VHDL Design Files
 ../rtl/src/mr_fft_pkg.vhd
 ../rtl/src/twiddle_pkg.vhd
+../rtl/src/mr_fft_cfg_pkg.vhd
 ../rtl/src/twiddle_rom.vhd
 ../rtl/src/fifo_fwft.vhd
 ../rtl/src/mr_fft_fifo.vhd
@@ -11,3 +12,5 @@
 ../rtl/src/mr_fft_rotator.vhd
 // ../rtl/tb/preadder_vectors_pkg.vhd
 ../rtl/src/mr_fft_stage.vhd
+../rtl/src/mr_fft_chain.vhd
+../rtl/src/mr_fft_top.vhd

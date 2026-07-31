@@ -1,43 +1,125 @@
+import math
+import re
 from collections import deque
 
 import numpy as np
 from fxpmath import Fxp
 from utils import Fifo
 
+# When True, every quantization goes through fxpmath (the original reference
+# implementation). The default fast path does the same arithmetic in plain
+# float64/int -- bit-identical (all reachable values are exact in float64;
+# proven by the golden-vector regeneration and model/check_fast_quantizer) --
+# and ~50-100x faster, since Fxp() deep-copies its config on every call.
+USE_REFERENCE_FXP = False
+
 
 class _Quantizer:
     def __init__(self, dtype='fxp-s32/12', overflow='wrap', rounding='floor'):
-        self.DATA = Fxp(None, True, dtype=dtype)
         # rounding='floor' models VHDL fixed_truncate (toward -inf); 'around' is
-        # round-to-nearest. Chosen per-quantizer so it can be set globally.
-        self.DATA.config.rounding = rounding
+        # round-to-nearest ties-to-even (VHDL fixed_round). 'half_up' is
+        # round-to-nearest ties-toward-+inf: +LSB/2 then floor, mirroring the
+        # DSP-post-adder-friendly RTL form `resize(x + half_lsb, ...,
+        # fixed_truncate)`. Not a native fxpmath mode, so it is applied as a
+        # pre-bias in q()/qw(). Chosen per-quantizer so it can be set globally.
+        self._half_up = (rounding == 'half_up')
+        fxp_rounding = 'floor' if self._half_up else rounding
+        self.DATA = Fxp(None, True, dtype=dtype)
+        self.DATA.config.rounding = fxp_rounding
         self.DATA.config.overflow = overflow
         # No automatic guard-bit growth: the datapath width is exactly `dtype`
         # (specified via inner_type). DATA_WIDE mirrors DATA so the qw/qcw/shift
         # helpers operate at that same, explicitly-chosen width.
         self.DATA_WIDE = Fxp(None, True, dtype=dtype)
-        self.DATA_WIDE.config.rounding = rounding
+        self.DATA_WIDE.config.rounding = fxp_rounding
         self.DATA_WIDE.config.overflow = overflow
+        # half LSB of the target format; exact in float64 for every reachable
+        # datapath value (products carry well under 53 significand bits), so
+        # the bias itself never adds rounding error
+        self._half_lsb = 2.0 ** -(int(self.DATA.n_frac) + 1)
+
+        # fast path: scale to the integer code grid, round, wrap/saturate --
+        # exact in float64 (scale is a power of two, codes fit well under 53
+        # bits), bit-identical to the fxpmath path above
+        fmt = re.fullmatch(r'fxp-s(\d+)/(\d+)', dtype) if isinstance(dtype, str) else None
+        self._fast = (fmt is not None and not USE_REFERENCE_FXP
+                      and rounding in ('floor', 'around', 'half_up')
+                      and overflow in ('wrap', 'saturate'))
+        if fmt:
+            wbits, fbits = int(fmt.group(1)), int(fmt.group(2))
+            self._scale = float(1 << fbits)
+            self._inv_scale = 1.0 / self._scale
+            self._span = 1 << wbits
+            self._max_i = (1 << (wbits - 1)) - 1
+            self._min_i = -(1 << (wbits - 1))
+        self._wrap = (overflow == 'wrap')
+        self._floor = (fxp_rounding == 'floor')
+
+    def _to_int(self, value, half_up_bias):
+        x = float(value) * self._scale
+        if half_up_bias:
+            k = math.floor(x + 0.5)
+        elif self._floor:
+            k = math.floor(x)
+        else:
+            k = round(x)            # ties to even, like fxpmath 'around'
+        if self._wrap:
+            k = ((k - self._min_i) % self._span) + self._min_i
+        elif k > self._max_i:
+            k = self._max_i
+        elif k < self._min_i:
+            k = self._min_i
+        return k
 
     def q(self, value):
+        if self._fast:
+            return self._to_int(value, self._half_up) * self._inv_scale
+        if self._half_up:
+            value = value + self._half_lsb
         return float(Fxp(value, like=self.DATA))
 
     def qc(self, value):
         return complex(self.q(np.real(value)), self.q(np.imag(value)))
 
     def qw(self, value):
+        if self._fast:
+            return self._to_int(value, self._half_up) * self._inv_scale
+        if self._half_up:
+            value = value + self._half_lsb
         return float(Fxp(value, like=self.DATA_WIDE))
 
     def qcw(self, value):
         return complex(self.qw(np.real(value)), self.qw(np.imag(value)))
 
     def q_shifted(self, value, bits):
+        # arithmetic right shift (preadder s0 path and output scaling). In
+        # 'half_up' mode the shift rounds: +2^(bits-1) -- half LSB of the
+        # result, a carry-in in hardware -- before shifting; otherwise it
+        # truncates like the RTL shift_right does today. Note: the pre-shift
+        # quantize replicates the reference below, where the bare
+        # Fxp(value, dtype=) uses fxpmath DEFAULTS (trunc + saturate), NOT
+        # this quantizer's config. Irrelevant in the datapath -- shift inputs
+        # are always on-grid and in range -- but kept for bit-identity.
         if bits == 0:
             return self.qw(value)
 
+        if self._fast:
+            k = math.trunc(float(value) * self._scale)
+            if k > self._max_i:
+                k = self._max_i
+            elif k < self._min_i:
+                k = self._min_i
+            if self._half_up:
+                k += 1 << (bits - 1)
+            k >>= bits              # arithmetic shift, floors like numpy
+            return k * self._inv_scale
+
         fxp_value = Fxp(value, True, dtype=self.DATA_WIDE.dtype)
         shifted = Fxp(None, True, dtype=self.DATA_WIDE.dtype)
-        shifted.val = fxp_value.val >> bits
+        raw = fxp_value.val
+        if self._half_up:
+            raw = raw + (1 << (bits - 1))
+        shifted.val = raw >> bits
         return float(shifted)
 
     def qcw_shifted(self, value, bits):
@@ -113,14 +195,12 @@ class SinCosLUT:
         self.P = self.A + self.f             # phase-accumulator width
         self.Q = self.L >> 2                 # quarter = L/4
         self.interp = bool(interp)
-        self.qz = _Quantizer(dtype=twiddle_dtype)   # interp-output quantizer
-        self.qz.DATA.config.rounding = table_rounding    # twiddles round-to-nearest
+        self.qz = _Quantizer(dtype=twiddle_dtype, rounding=table_rounding)   # interp-output quantizer, twiddles round-to-nearest
         # L/4 ROM trick: store one cosine quadrant only (indices 0..L/4 inclusive).
         # ROM contents are design-time constants, so round-to-nearest (and optionally a
         # wider `table_dtype` than the datapath word) -- this removes the negate-asymmetry
         # and double-quantization loss that floor rounding would add across quadrants.
-        qz_tab = _Quantizer(dtype=(table_dtype or twiddle_dtype))
-        qz_tab.DATA.config.rounding = table_rounding
+        qz_tab = _Quantizer(dtype=(table_dtype or twiddle_dtype), rounding=table_rounding)
         self.cos_q = np.array([qz_tab.q(np.cos(2 * np.pi * m / self.L))
                                for m in range(self.Q + 1)])
         self.f_scale = (1.0 / (1 << self.f)) if self.f else 0.0   # constant (interp only)
@@ -197,7 +277,7 @@ class MixedRadix_PreAdder_FXP:
     one's config-2/3 paths, so for the same inputs every capability is bit-exact
     against capability=5."""
 
-    def __init__(self, dtype='fxp-s32/12', shift_bits=0, overflow='saturate', coeff_dtype=None, rounding='floor', capability=5):
+    def __init__(self, dtype='fxp-s32/12', shift_bits=0, overflow='saturate', coeff_dtype=None, rounding='floor', capability=5, exit_round=False, internal_frac=None):
         if int(capability) not in [2, 3, 5]:
             raise ValueError('capability must be 5 (radix235), 3 (radix23) or 2 (radix2)')
         self.capability = int(capability)
@@ -208,6 +288,30 @@ class MixedRadix_PreAdder_FXP:
         # datapath keeps the data width regardless of the coefficient width.
         self.qzc = _Quantizer(dtype=coeff_dtype, overflow=overflow, rounding=rounding) if coeff_dtype else None
         self.shift_bits = int(shift_bits)
+        # exit_round=False (legacy): every internal node re-quantizes at `dtype`
+        # (single-dtype convention, bit-exact with today's RTL).
+        # exit_round=True: "18 bits in memory, wide in flight" -- inputs are the
+        # memory word (`dtype`), the internal adder tree and raw products keep
+        # full precision (exact in float64 at these depths; in RTL a wider
+        # sfixed on the DSP 25-bit data port / fabric adders), and each output
+        # is scaled and rounded ONCE to the memory word before the result
+        # FIFOs. `internal_peak` tracks the largest internal magnitude so the
+        # required guard bits can be checked against the DSP port budget.
+        self.exit_round = bool(exit_round)
+        self.internal_peak = 0.0
+        # internal_frac (exit_round mode only): fraction bits kept on the raw
+        # coefficient products before the t3 adds. None = full precision
+        # (data_frac + coeff_frac, the DSP M/P register word); a value like
+        # 20-22 models trimming the product so the post-multiplier fabric
+        # adders stay narrow. Rounded with the datapath rounding mode. The
+        # quantizer's 8 int bits are deliberately generous -- the REAL int
+        # requirement comes from internal_peak; this models frac trimming only.
+        self.internal_frac = int(internal_frac) if internal_frac else None
+        if self.internal_frac and not self.exit_round:
+            raise ValueError('internal_frac requires exit_round=True')
+        self.qz_prod = (_Quantizer(dtype=f'fxp-s{self.internal_frac + 8}/{self.internal_frac}',
+                                   overflow=overflow, rounding=rounding)
+                        if self.internal_frac else None)
 
         self.input_0 = 0.0 + 0.0j
         self.input_1 = 0.0 + 0.0j
@@ -234,6 +338,37 @@ class MixedRadix_PreAdder_FXP:
         if self.capability >= 3:
             self.k6 = qk(-np.sqrt(3) / 2)
 
+    # internal-node quantizers: identity (peak-tracked) in exit_round mode,
+    # per-node re-quantization at the datapath word otherwise
+    def _qw(self, value):
+        if self.exit_round:
+            peak = max(abs(value.real), abs(value.imag))
+            if peak > self.internal_peak:
+                self.internal_peak = peak
+            return value
+        return self.qz.qcw(value)
+
+    def _qw_shifted(self, value, bits):
+        if self.exit_round:
+            return self._qw(value * 2.0 ** -bits)   # wide word keeps the bits
+        return self.qz.qcw_shifted(value, bits)
+
+    # coefficient-product quantizer: trims the raw product to internal_frac
+    # fraction bits (exit_round mode with internal_frac set); otherwise the
+    # product follows the internal-node convention (_qw)
+    def _qprod(self, value):
+        if self.qz_prod is not None:
+            return self._qw(self.qz_prod.qcw(value))
+        return self._qw(value)
+
+    # output quantizer: scaling shift + ONE rounding to the memory word
+    def _qout(self, value):
+        if self.shift_bits:
+            if self.exit_round:
+                return self.qz.qc(value * 2.0 ** -self.shift_bits)
+            return self.qz.qc(self.qz.qcw_shifted(value, self.shift_bits))
+        return self.qz.qc(value)
+
     def calculate(self, s0=0, s1=0):
         # capability if-generate: dispatch to the datapath this instance was built with
         if self.capability == 3:
@@ -250,68 +385,68 @@ class MixedRadix_PreAdder_FXP:
         self.input_3 = self.qz.qc(self.input_3)
         self.input_4 = self.qz.qc(self.input_4)
 
-        tmp_0_0 = self.qz.qcw(self.input_0)
-        tmp_1_0 = self.qz.qcw(self.input_1 + self.input_4)
-        tmp_2_0 = self.qz.qcw(self.input_2 + self.input_3)
-        tmp_3_0 = self.qz.qcw(self.input_1 - self.input_4)
-        tmp_4_0 = self.qz.qcw(self.input_2 - self.input_3)
+        tmp_0_0 = self._qw(self.input_0)
+        tmp_1_0 = self._qw(self.input_1 + self.input_4)
+        tmp_2_0 = self._qw(self.input_2 + self.input_3)
+        tmp_3_0 = self._qw(self.input_1 - self.input_4)
+        tmp_4_0 = self._qw(self.input_2 - self.input_3)
 
         tmp_0_1 = tmp_0_0
-        tmp_1_1 = self.qz.qcw(tmp_1_0 + tmp_2_0)
-        tmp_2_1 = self.qz.qcw(tmp_1_0 - tmp_2_0)
+        tmp_1_1 = self._qw(tmp_1_0 + tmp_2_0)
+        tmp_2_1 = self._qw(tmp_1_0 - tmp_2_0)
         tmp_3_1 = tmp_3_0
         tmp_4_1 = tmp_4_0
-        tmp_5_1 = self.qz.qcw(tmp_3_0 + tmp_4_0)
+        tmp_5_1 = self._qw(tmp_3_0 + tmp_4_0)
 
-        tmp_0_2 = self.qz.qcw(tmp_0_1 + tmp_1_1)
+        tmp_0_2 = self._qw(tmp_0_1 + tmp_1_1)
 
         if s0 == 0:
-            tmp_1_2 = self.qz.qcw(tmp_0_1 - tmp_1_1)
+            tmp_1_2 = self._qw(tmp_0_1 - tmp_1_1)
         elif s0 == 1:
-            tmp_1_2 = self.qz.qcw(tmp_0_1 - self.qz.qcw_shifted(tmp_1_1, 1))
+            tmp_1_2 = self._qw(tmp_0_1 - self._qw_shifted(tmp_1_1, 1))
         else:
-            tmp_1_2 = self.qz.qcw(tmp_0_1 - self.qz.qcw_shifted(tmp_1_1, 2))
+            tmp_1_2 = self._qw(tmp_0_1 - self._qw_shifted(tmp_1_1, 2))
 
         mul_1 = self.k6 if (s1 == 0) else self.k2
-        mul_1_res = self.qz.qcw(tmp_2_1 * mul_1)
+        mul_1_res = self._qprod(tmp_2_1 * mul_1)
 
         if s1 == 1:
             tmp_2_2 = mul_1_res
         else:
-            tmp_2_2 = self.qz.qcw(mul_1_res * 1j)
+            tmp_2_2 = self._qw(mul_1_res * 1j)
 
-        tmp_3_2 = self.qz.qcw(tmp_3_1 * self.k3)
-        tmp_4_2 = self.qz.qcw(tmp_4_1 * self.k5)
-        tmp_5_2 = self.qz.qcw(tmp_5_1 * self.k4)
+        tmp_3_2 = self._qprod(tmp_3_1 * self.k3)
+        tmp_4_2 = self._qprod(tmp_4_1 * self.k5)
+        tmp_5_2 = self._qprod(tmp_5_1 * self.k4)
 
         tmp_0_3 = tmp_0_2
         tmp_5_3 = tmp_1_2
-        tmp_1_3 = self.qz.qcw(tmp_1_2 + tmp_2_2)
-        tmp_2_3 = self.qz.qcw(tmp_1_2 - tmp_2_2)
-        tmp_3_3 = self.qz.qcw(tmp_3_2 + tmp_5_2)
-        tmp_4_3 = self.qz.qcw(tmp_4_2 + tmp_5_2)
+        tmp_1_3 = self._qw(tmp_1_2 + tmp_2_2)
+        tmp_2_3 = self._qw(tmp_1_2 - tmp_2_2)
+        tmp_3_3 = self._qw(tmp_3_2 + tmp_5_2)
+        tmp_4_3 = self._qw(tmp_4_2 + tmp_5_2)
 
         # apply optional right-shift scaling before final rounding/quantization
-        self.output_0 = self.qz.qc(self.qz.qcw_shifted(tmp_0_3, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_0_3)
+        self.output_0 = self._qout(tmp_0_3)
 
         tmp_out_1_radix5 = tmp_1_3 + tmp_3_3
         tmp_out_1_radix3 = tmp_1_3
         tmp_out_1_radix2 = tmp_5_3
 
         if s0 == 0:
-            self.output_1 = self.qz.qc(self.qz.qcw_shifted(tmp_out_1_radix2, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_out_1_radix2)
+            self.output_1 = self._qout(tmp_out_1_radix2)
         elif s0 == 1:
-            self.output_1 = self.qz.qc(self.qz.qcw_shifted(tmp_out_1_radix3, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_out_1_radix3)
+            self.output_1 = self._qout(tmp_out_1_radix3)
         else:
-            self.output_1 = self.qz.qc(self.qz.qcw_shifted(tmp_out_1_radix5, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_out_1_radix5)
+            self.output_1 = self._qout(tmp_out_1_radix5)
 
         tmp_out_2_radix5 = tmp_2_3 + tmp_4_3
         tmp_out_2_radix3 = tmp_2_3
         out2_val = tmp_out_2_radix3 if (s1 == 0) else tmp_out_2_radix5
-        self.output_2 = self.qz.qc(self.qz.qcw_shifted(out2_val, self.shift_bits)) if self.shift_bits else self.qz.qc(out2_val)
+        self.output_2 = self._qout(out2_val)
 
-        self.output_4 = self.qz.qc(self.qz.qcw_shifted(tmp_1_3 - tmp_3_3, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_1_3 - tmp_3_3)
-        self.output_3 = self.qz.qc(self.qz.qcw_shifted(tmp_2_3 - tmp_4_3, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_2_3 - tmp_4_3)
+        self.output_4 = self._qout(tmp_1_3 - tmp_3_3)
+        self.output_3 = self._qout(tmp_2_3 - tmp_4_3)
 
     def _calculate_23(self, s0):
         # capability=3 datapath: the full preadder's config-2/3 paths with inputs 3/4
@@ -320,43 +455,43 @@ class MixedRadix_PreAdder_FXP:
         self.input_1 = self.qz.qc(self.input_1)
         self.input_2 = self.qz.qc(self.input_2)
 
-        tmp_0_0 = self.qz.qcw(self.input_0)
-        tmp_1_0 = self.qz.qcw(self.input_1)
-        tmp_2_0 = self.qz.qcw(self.input_2)
+        tmp_0_0 = self._qw(self.input_0)
+        tmp_1_0 = self._qw(self.input_1)
+        tmp_2_0 = self._qw(self.input_2)
 
-        tmp_1_1 = self.qz.qcw(tmp_1_0 + tmp_2_0)
-        tmp_2_1 = self.qz.qcw(tmp_1_0 - tmp_2_0)
+        tmp_1_1 = self._qw(tmp_1_0 + tmp_2_0)
+        tmp_2_1 = self._qw(tmp_1_0 - tmp_2_0)
 
-        tmp_0_2 = self.qz.qcw(tmp_0_0 + tmp_1_1)
+        tmp_0_2 = self._qw(tmp_0_0 + tmp_1_1)
 
         if s0 == 0:
-            tmp_1_2 = self.qz.qcw(tmp_0_0 - tmp_1_1)
+            tmp_1_2 = self._qw(tmp_0_0 - tmp_1_1)
         else:
-            tmp_1_2 = self.qz.qcw(tmp_0_0 - self.qz.qcw_shifted(tmp_1_1, 1))
+            tmp_1_2 = self._qw(tmp_0_0 - self._qw_shifted(tmp_1_1, 1))
 
-        mul_1_res = self.qz.qcw(tmp_2_1 * self.k6)
-        tmp_2_2 = self.qz.qcw(mul_1_res * 1j)
+        mul_1_res = self._qprod(tmp_2_1 * self.k6)
+        tmp_2_2 = self._qw(mul_1_res * 1j)
 
-        tmp_1_3 = self.qz.qcw(tmp_1_2 + tmp_2_2)
-        tmp_2_3 = self.qz.qcw(tmp_1_2 - tmp_2_2)
+        tmp_1_3 = self._qw(tmp_1_2 + tmp_2_2)
+        tmp_2_3 = self._qw(tmp_1_2 - tmp_2_2)
 
-        self.output_0 = self.qz.qc(self.qz.qcw_shifted(tmp_0_2, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_0_2)
+        self.output_0 = self._qout(tmp_0_2)
 
         out1_val = tmp_1_2 if (s0 == 0) else tmp_1_3
-        self.output_1 = self.qz.qc(self.qz.qcw_shifted(out1_val, self.shift_bits)) if self.shift_bits else self.qz.qc(out1_val)
+        self.output_1 = self._qout(out1_val)
 
-        self.output_2 = self.qz.qc(self.qz.qcw_shifted(tmp_2_3, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_2_3)
+        self.output_2 = self._qout(tmp_2_3)
 
     def _calculate_2(self):
         # capability=2 datapath: plain 2-point butterfly, no multipliers.
         self.input_0 = self.qz.qc(self.input_0)
         self.input_1 = self.qz.qc(self.input_1)
 
-        tmp_0 = self.qz.qcw(self.input_0 + self.input_1)
-        tmp_1 = self.qz.qcw(self.input_0 - self.input_1)
+        tmp_0 = self._qw(self.input_0 + self.input_1)
+        tmp_1 = self._qw(self.input_0 - self.input_1)
 
-        self.output_0 = self.qz.qc(self.qz.qcw_shifted(tmp_0, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_0)
-        self.output_1 = self.qz.qc(self.qz.qcw_shifted(tmp_1, self.shift_bits)) if self.shift_bits else self.qz.qc(tmp_1)
+        self.output_0 = self._qout(tmp_0)
+        self.output_1 = self._qout(tmp_1)
 
 
 class TwiddleROM:
@@ -538,9 +673,7 @@ class MixedRadix_Rotator_FXP:
         if twiddle_dtype is None:
             twiddle_dtype = dtype
         # Twiddle values may round-to-nearest, independent of the floor-rounded data path.
-        qz_twiddle = _Quantizer(dtype=twiddle_dtype, overflow=overflow)
-        qz_twiddle.DATA.config.rounding = twiddle_rounding
-        qz_twiddle.DATA_WIDE.config.rounding = twiddle_rounding
+        qz_twiddle = _Quantizer(dtype=twiddle_dtype, overflow=overflow, rounding=twiddle_rounding)
 
         # twiddle_configs: the full (radix, size) set this stage must support. If given,
         # the ROM holds all of them and reconfigure() just selects; else it defaults to
@@ -609,7 +742,7 @@ class MixedRadix_SDF_stage_counter_ctrl_FXP:
     same (config, size) every capability produces a bit-identical output stream, so
     stages of different capability can be mixed freely in a chain."""
 
-    def __init__(self, config, stage_index, size, cfg_delay=None, s0=2, s1=1, dtype='fxp-s32/12', preadder_shift_bits=None, overflow='wrap', twiddle_dtype=None, twiddle_source='exact', lut=None, twiddle_rounding='around', twiddle_configs=None, inner_type=None, input_dtype=None, coeff_dtype=None, rounding='floor', capability=5):
+    def __init__(self, config, stage_index, size, cfg_delay=None, s0=2, s1=1, dtype='fxp-s32/12', preadder_shift_bits=None, overflow='wrap', twiddle_dtype=None, twiddle_source='exact', lut=None, twiddle_rounding='around', twiddle_configs=None, inner_type=None, input_dtype=None, coeff_dtype=None, rounding='floor', capability=5, preadder_exit_round=False, preadder_internal_frac=None):
         if int(capability) not in [2, 3, 5]:
             raise ValueError('capability must be 5 (radix235), 3 (radix23) or 2 (radix2)')
         self.capability = int(capability)
@@ -660,7 +793,7 @@ class MixedRadix_SDF_stage_counter_ctrl_FXP:
             else:
                 preadder_shift_bits = 3
 
-        self.pre_adder = MixedRadix_PreAdder_FXP(dtype=inner, shift_bits=preadder_shift_bits, overflow=overflow, coeff_dtype=coeff_dtype, rounding=rounding, capability=self.capability)
+        self.pre_adder = MixedRadix_PreAdder_FXP(dtype=inner, shift_bits=preadder_shift_bits, overflow=overflow, coeff_dtype=coeff_dtype, rounding=rounding, capability=self.capability, exit_round=preadder_exit_round, internal_frac=preadder_internal_frac)
         self.rotator = MixedRadix_Rotator_FXP(config=self.config, stage_index=self.stage_index, size=self.num_of_samples, dtype=inner, overflow=overflow, twiddle_dtype=twiddle_dtype, twiddle_source=twiddle_source, lut=lut, twiddle_rounding=twiddle_rounding, twiddle_configs=twiddle_configs, rounding=rounding)
 
         self.ctrl = RadixPhaseController(cfg=self.config, cfg_delay=self.cfg_delay)

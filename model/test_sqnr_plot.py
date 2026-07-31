@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -17,17 +18,60 @@ except Exception as exc:
     raise ImportError('matplotlib is required for plotting. Install it in your env.') from exc
 
 
+def shift_schedule(radices, scaling='fixed'):
+    """Per-stage preadder output right-shifts (the scaling schedule).
+
+    'fixed'    -- every stage shifts by ceil(log2(radix)) (2->1, 3->2, 5->3).
+                  Radix-3/5 stages over-scale by 4/3 and 8/5, so the level
+                  decays by 2**total_shift/N through the chain and the final
+                  scaler amplifies late-stage rounding noise by that factor.
+    'balanced' -- radix-2 shifts 1 (exact), radix-3 shifts 1 or 2, radix-5
+                  shifts 2 or 3, chosen greedily so the cumulative net gain
+                  prod(radix)/prod(2**shift) never exceeds 1: the level rides
+                  just under full scale the whole way and the end residual
+                  stays below one bit.
+
+    Pure INTEGER rule (prod_r <= prod_s << c) -- the VHDL elaboration-time
+    schedule function must reproduce this verbatim so RTL and model derive
+    identical schedules.
+    """
+    cands = {2: (1,), 3: (1, 2), 5: (2, 3)}
+    fixed = {2: 1, 3: 2, 5: 3}
+    prod_r, prod_s = 1, 1
+    shifts = []
+    for r in radices:
+        if scaling == 'fixed':
+            s = fixed[r]
+        elif scaling == 'balanced':
+            s = next((c for c in cands[r] if prod_r * r <= prod_s << c), cands[r][-1])
+        else:
+            raise ValueError(f'unknown scaling schedule: {scaling}')
+        prod_r *= r
+        prod_s <<= s
+        shifts.append(s)
+    return shifts
+
+
 def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12', twiddle_dtype=None,
-              input_dtype=None, coeff_dtype=None, output_dtype=None, rounding=None):
+              input_dtype=None, coeff_dtype=None, output_dtype=None, rounding=None,
+              scaling='fixed', preadder_exit_round=False, preadder_internal_frac=None,
+              run_fp=True, final_scaler=True):
+    # final_scaler=False returns the RAW chain output, X * 2**(-total_shift) --
+    # what the HARDWARE delivers (no output rescaler exists in the RTL); the
+    # caller must then reference against fft(x) * 2**(-total_shift), NOT
+    # fft(x)/N. The scaler's requantization shifts single-frame tone SQNR by
+    # up to ~2.5 dB either way, so hardware-representative runs need False.
+    # run_fp=False skips the floating-point reference chain entirely (the
+    # sweeps compare against scipy's FFT and discard fp_out) -- ~2x faster.
     # dtype is the inner_type (datapath). input_dtype quantizes the chain input (first
     # stage only), coeff_dtype the preadder constants, output_dtype the final result.
-    # rounding, when set, is a GLOBAL override applied to every quantizer (datapath,
-    # coefficients, and twiddles). When None, the model keeps its defaults: 'floor'
-    # (truncation) on the datapath and 'around' (round-to-nearest) on the twiddles.
-    if rounding is None:
-        data_rounding, tw_rounding = 'floor', 'around'
-    else:
-        data_rounding = tw_rounding = rounding
+    # rounding, when set, overrides the datapath/coefficient quantizers ('floor'
+    # when unset). Twiddle table values are design-time ROM constants, so they
+    # ALWAYS keep round-to-nearest regardless of the override -- matching the
+    # RTL, where the ROM init is precomputed and only the datapath style would
+    # ever change.
+    data_rounding = 'floor' if rounding is None else rounding
+    tw_rounding = 'around'
     # allow a single config (int) or a per-stage iterable (list/tuple/ndarray)
     if hasattr(config, '__iter__') and not isinstance(config, (str, bytes)):
         configs = list(config)
@@ -41,31 +85,29 @@ def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12', twiddle_dty
     stages_fxp = []
     total_shift = 0
 
-    for stage_pos, (cfg, size) in enumerate(zip(configs, stage_sizes)):
-        if cfg == 5:
-            delay = size // 5
-            total_shift += 3
-        elif cfg == 3:
-            delay = size // 3
-            total_shift += 2
-        else:
-            delay = size // 2
-            total_shift += 1
+    shifts = shift_schedule(configs, scaling)
 
-        stages_fp.append(
-            MixedRadix_SDF_stage_counter_ctrl(
-                config=cfg,
-                stage_index=0,
-                size=size,
-                cfg_delay=delay,
+    for stage_pos, (cfg, size) in enumerate(zip(configs, stage_sizes)):
+        delay = size // cfg
+        shift = shifts[stage_pos]
+        total_shift += shift
+
+        if run_fp:
+            stages_fp.append(
+                MixedRadix_SDF_stage_counter_ctrl(
+                    config=cfg,
+                    stage_index=0,
+                    size=size,
+                    cfg_delay=delay,
+                )
             )
-        )
         stages_fxp.append(
             MixedRadix_SDF_stage_counter_ctrl_FXP(
                 config=cfg,
                 stage_index=0,
                 size=size,
                 cfg_delay=delay,
+                preadder_shift_bits=shift,
                 dtype=dtype,
                 twiddle_dtype=twiddle_dtype,
                 coeff_dtype=coeff_dtype,
@@ -73,34 +115,44 @@ def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12', twiddle_dty
                 rounding=data_rounding,
                 twiddle_rounding=tw_rounding,
                 capability=cfg,
+                preadder_exit_round=preadder_exit_round,
+                preadder_internal_frac=preadder_internal_frac,
             )
         )
 
     out_fp = []
     out_fxp = []
-    final_scaler = MixedRadix_FinalScaler_FXP(size=stage_sizes[0], total_shift=total_shift, dtype=output_dtype, output_dtype=output_dtype, rounding=data_rounding)
+    # output word defaults to the datapath word -- without this, dtype=None
+    # fell through to fxpmath's DEFAULT fxp-s16/15 (range +-1, saturate),
+    # silently clipping any output bin above 1.0 (caught with a sqrt(2) tone)
+    out_dtype = output_dtype or dtype
+    scaler = MixedRadix_FinalScaler_FXP(size=stage_sizes[0], total_shift=total_shift, dtype=out_dtype, output_dtype=out_dtype, rounding=data_rounding)
     print(f"Scale = {str(2**total_shift/stage_sizes[0])}")
 
     for sample in input_signal:
         val_fp = sample
         val_fxp = sample
 
-        for stage in stages_fp:
-            val_fp = stage.calculate(val_fp, valid=True)
+        if run_fp:
+            for stage in stages_fp:
+                val_fp = stage.calculate(val_fp, valid=True)
+            out_fp.append(val_fp / stage_sizes[0])
 
         for stage in stages_fxp:
             val_fxp = stage.calculate(val_fxp, valid=True)
 
-        val_fp = val_fp / stage_sizes[0]
-        val_fxp = final_scaler.scale_sample(val_fxp)
-
-        out_fp.append(val_fp)
+        if final_scaler:
+            val_fxp = scaler.scale_sample(val_fxp)
         out_fxp.append(val_fxp)
 
     preadder_widths = {}
     for stage_index, stage in enumerate(stages_fxp):
         if hasattr(stage, 'pre_adder') and hasattr(stage.pre_adder, 'get_max_width_trace'):
             preadder_widths[f'stage_{stage_index}'] = stage.pre_adder.get_max_width_trace()
+        if preadder_exit_round:
+            # largest wide-datapath magnitude seen inside the preadder -- sizes
+            # the internal guard bits (must fit the DSP 25-bit data port)
+            preadder_widths[f'stage_{stage_index}_peak'] = stage.pre_adder.internal_peak
 
     return np.array(out_fp), np.array(out_fxp), preadder_widths
 
@@ -116,7 +168,15 @@ def sqnr(ref, test):
 
 def generate_signal(kind, n):
     if kind == 'single_tone':
-        k = 33
+        # coherent (bin-centered) complex tone: integer k -> zero leakage, so
+        # everything outside bin k is quantization noise. k ~ N/7 and coprime
+        # with N so the twiddle walk is generic (a k sharing a factor with N
+        # exercises only degenerate exponent subsets in some stages) -- the
+        # IEEE-1241-style "relatively prime number of cycles" rule.
+        # 0.9 amplitude ~ -1 dBFS, honoring the chain input contract.
+        k = max(1, n // 7)
+        while math.gcd(k, n) != 1:
+            k += 1
         idx = np.arange(n, dtype=float)
         return np.sqrt(2) * np.exp(2j * np.pi * k * idx / n)
     if kind == 'sine':
@@ -182,7 +242,8 @@ def total_chain_latency(configs, stage_sizes):
 
 
 def evaluate_case(case_name, config, stage_sizes, stage_radices, dtypes, twiddle_dtypes, signal_kind,
-                  input_dtype=None, coeff_dtype=None, output_dtype=None, rounding=None):
+                  input_dtype=None, coeff_dtype=None, output_dtype=None, rounding=None,
+                  scaling='fixed', preadder_round='exit', internal_frac=22):
     n = int(np.prod(stage_radices))
     x = generate_signal(signal_kind, n)
     x_pad = np.append(x, np.zeros(n))
@@ -213,6 +274,10 @@ def evaluate_case(case_name, config, stage_sizes, stage_radices, dtypes, twiddle
                 coeff_dtype=coeff_dtype,
                 output_dtype=output_dtype,
                 rounding=rounding,
+                scaling=scaling,
+                preadder_exit_round=(preadder_round == 'exit'),
+                preadder_internal_frac=internal_frac,
+                run_fp=False,   # the float reference was already computed above
             )
             fxp_ss = fxp_out[latency:latency + n]
             fxp_ss = fxp_ss[digit_reverse(list(reversed(stage_radices)))]
@@ -300,7 +365,11 @@ def save_preadder_width_plot(case_result, out_dir):
     case_tag = case_result['case_name'].lower().replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_')
 
     for dtype, result in case_result['dtype_results'].items():
-        stage_maps = result.get('preadder_widths', {})
+        # keep only the per-operand width-trace dicts; the flat 'stage_N_peak'
+        # floats (exit-mode internal peak, for guard-bit sizing) are not part
+        # of the heatmap
+        stage_maps = {k: v for k, v in result.get('preadder_widths', {}).items()
+                      if isinstance(v, dict)}
         if not stage_maps:
             continue
 
@@ -360,8 +429,8 @@ def parse_args():
     parser.add_argument(
         '--dtypes',
         nargs='+',
-        default=['fxp-s16/10', 'fxp-s24/10', 'fxp-s32/12'],
-        help='List of fxpmath dtype formats to compare.',
+        default=['fxp-s18/16'],
+        help='List of fxpmath dtype formats to compare (default: the RTL data word).',
     )
     parser.add_argument(
         '--signal',
@@ -396,10 +465,34 @@ def parse_args():
     )
     parser.add_argument(
         '--rounding',
-        choices=['floor', 'around'],
-        default=None,
-        help="Global rounding for EVERY quantizer (datapath, coeffs, twiddles). "
-             "Default (unset) keeps 'floor' on the datapath and 'around' on twiddles.",
+        choices=['floor', 'around', 'half_up'],
+        default='half_up',
+        help="Rounding for the datapath and coefficient quantizers (default 'half_up', "
+             "the RTL convention). 'around' = ties-to-even (VHDL fixed_round), "
+             "'floor' = truncation (legacy). Twiddle table values are ROM constants "
+             "and always stay round-to-nearest.",
+    )
+    parser.add_argument(
+        '--scaling',
+        choices=['fixed', 'balanced'],
+        default='fixed',
+        help="Per-stage shift schedule (default 'fixed' = the RTL: ceil(log2(radix)) "
+             "derived from the radix mode; 'balanced' is model-only for now).",
+    )
+    parser.add_argument(
+        '--preadder-round',
+        choices=['node', 'exit'],
+        default='exit',
+        help="'exit' (default, the RTL convention) = 18 bits in memory, wide in "
+             "flight, one shift+round at the preadder outputs; 'node' = legacy "
+             "per-intermediate re-quantization.",
+    )
+    parser.add_argument(
+        '--internal-frac',
+        type=int,
+        default=22,
+        help='exit mode: fraction bits kept on the preadder products '
+             '(c_fxp_prod_frac_width; default 22, the RTL value).',
     )
     parser.add_argument(
         '--sweep-file',
@@ -456,6 +549,9 @@ def main():
         args.coeff_dtype = sweep_cfg.get('coeff_dtype', args.coeff_dtype)
         args.output_dtype = sweep_cfg.get('output_dtype', args.output_dtype)
         args.rounding = sweep_cfg.get('rounding', args.rounding)
+        args.scaling = sweep_cfg.get('scaling', args.scaling)
+        args.preadder_round = sweep_cfg.get('preadder_round', args.preadder_round)
+        args.internal_frac = sweep_cfg.get('internal_frac', args.internal_frac)
     else:
         args.signals = [args.signal]
         args.twiddle_dtypes = [args.twiddle_dtype] if args.twiddle_dtype else [None]
@@ -488,6 +584,9 @@ def main():
             coeff_dtype=args.coeff_dtype,
             output_dtype=args.output_dtype,
             rounding=args.rounding,
+            scaling=args.scaling,
+            preadder_round=args.preadder_round,
+            internal_frac=args.internal_frac,
         )
         print_summary_table(result)
         all_plot_paths.extend(save_plots(result, out_dir))
