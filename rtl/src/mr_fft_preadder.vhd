@@ -51,6 +51,9 @@ architecture rtl of mr_fft_preadder is
 	type t_cmplx_wide_array is array (5 downto 0) of t_cmplx_wide;
 	type t_cmplx_prod_array is array (5 downto 0) of t_cmplx_prod;
 
+	-- one output component (t_cmplx.re/.im)
+	subtype t_comp is sfixed(c_fxp_int_width - 1 downto -c_fxp_frac_width);
+
 	-- raw coefficient product: wide (s5.18) x coeff (s2.16) real products
 	-- combined with one growth bit; lives in the DSP M/P registers
 	subtype t_raw is sfixed(c_fxp_int_wide_width + c_coeff_int_width
@@ -76,6 +79,29 @@ architecture rtl of mr_fft_preadder is
 	constant c_exit_half_3 : t_acc := to_sfixed(2.0 ** (3 - c_fxp_frac_width - 1),
 	                                            c_fxp_prod_int_width, -c_fxp_prod_frac_width);
 
+	-- Fused scaling-shift + half-up exit rounding back to the memory word:
+	-- +2^(shift-17), arithmetic shift by the radix mode's amount, truncate
+	-- (wrap). The shift amounts are LITERALS per branch -- xsim 2022.2
+	-- segfaults on fixed_pkg shift_right with a runtime-variable amount.
+	-- s0 mapping: "00" radix-2 (shift 1), "01" radix-3 (2), others radix-5
+	-- (3); capability-1 callers pass '0' & i_s0(0), capability-0 pass "00".
+	function f_exit_round(value : t_acc; s0 : std_logic_vector(1 downto 0)) return t_comp is
+		variable v : t_acc;
+	begin
+		case s0 is
+			when "00" =>
+				v := resize(value + c_exit_half_1, v, fixed_wrap, fixed_truncate);
+				v := shift_right(v, 1);
+			when "01" =>
+				v := resize(value + c_exit_half_2, v, fixed_wrap, fixed_truncate);
+				v := shift_right(v, 2);
+			when others =>
+				v := resize(value + c_exit_half_3, v, fixed_wrap, fixed_truncate);
+				v := shift_right(v, 3);
+		end case;
+		return resize(v, c_fxp_int_width - 1, -c_fxp_frac_width, fixed_wrap, fixed_truncate);
+	end function f_exit_round;
+
 	signal input_x0_wide, input_x1_wide, input_x2_wide, input_x3_wide, input_x4_wide : t_cmplx_wide;
 
 begin
@@ -95,8 +121,6 @@ begin
 			variable t0, t1                       : t_cmplx_wide_array;
 			variable t2_add0, t2_add1             : t_cmplx_wide;
 			variable t2, t3                       : t_cmplx_prod_array;
-			variable v_shift                      : natural range 1 to 3;
-			variable v_half                       : t_acc;
 			variable v0, v1, v2, v3, v4           : t_acc;
 		begin
 			-- Stage 0 (exact, wide)
@@ -154,8 +178,9 @@ begin
 			-- trim (truncate the biased product) + j-mux
 			case i_s1 is
 				when '0' => -- mul with j
-					t2(2).re := resize(-resize(r1.im, c_fxp_prod_int_width - 1, -c_fxp_prod_frac_width, fixed_wrap, fixed_truncate), t2(2).re, fixed_wrap, fixed_truncate);
 					t2(2).im := resize(r1.re, t2(2).im, fixed_wrap, fixed_truncate);
+					t2(2).re := resize(r1.im, t2(2).re, fixed_wrap, fixed_truncate);
+					t2(2).re := resize(-t2(2).re, t2(2).re, fixed_wrap, fixed_truncate);
 				when '1' => -- passthrough
 					t2(2).re := resize(r1.re, t2(2).re, fixed_wrap, fixed_truncate);
 					t2(2).im := resize(r1.im, t2(2).im, fixed_wrap, fixed_truncate);
@@ -189,14 +214,8 @@ begin
 			t3(4).re := resize(t2(4).re + t2(5).re, t3(4).re, fixed_wrap, fixed_truncate);
 			t3(4).im := resize(t2(4).im + t2(5).im, t3(4).im, fixed_wrap, fixed_truncate);
 
-			-- Stage output: selection sums + fused scaling-shift/half-up exit
-			-- rounding back to the memory word (the ONLY data rounding; wrap)
-			case i_s0 is
-				when "00"   => v_shift := 1; v_half := c_exit_half_1;  -- radix-2
-				when "01"   => v_shift := 2; v_half := c_exit_half_2;  -- radix-3
-				when others => v_shift := 3; v_half := c_exit_half_3;  -- radix-5
-			end case;
-
+			-- Stage output: selection sums, then the fused shift + half-up
+			-- exit rounding (f_exit_round) -- the ONLY data rounding (wrap)
 			v0 := resize(t3(0).re, v0);
 			case i_s0 is
 				when "00"   => v1 := resize(t3(5).re, v1);
@@ -210,11 +229,11 @@ begin
 			v3 := resize(t3(2).re - t3(4).re, v3, fixed_wrap, fixed_truncate);
 			v4 := resize(t3(1).re - t3(3).re, v4, fixed_wrap, fixed_truncate);
 
-			o_X0.re <= resize(shift_right(resize(v0 + v_half, v0, fixed_wrap, fixed_truncate), v_shift), o_X0.re, fixed_wrap, fixed_truncate);
-			o_X1.re <= resize(shift_right(resize(v1 + v_half, v1, fixed_wrap, fixed_truncate), v_shift), o_X1.re, fixed_wrap, fixed_truncate);
-			o_X2.re <= resize(shift_right(resize(v2 + v_half, v2, fixed_wrap, fixed_truncate), v_shift), o_X2.re, fixed_wrap, fixed_truncate);
-			o_X3.re <= resize(shift_right(resize(v3 + v_half, v3, fixed_wrap, fixed_truncate), v_shift), o_X3.re, fixed_wrap, fixed_truncate);
-			o_X4.re <= resize(shift_right(resize(v4 + v_half, v4, fixed_wrap, fixed_truncate), v_shift), o_X4.re, fixed_wrap, fixed_truncate);
+			o_X0.re <= f_exit_round(v0, i_s0);
+			o_X1.re <= f_exit_round(v1, i_s0);
+			o_X2.re <= f_exit_round(v2, i_s0);
+			o_X3.re <= f_exit_round(v3, i_s0);
+			o_X4.re <= f_exit_round(v4, i_s0);
 
 			v0 := resize(t3(0).im, v0);
 			case i_s0 is
@@ -229,11 +248,11 @@ begin
 			v3 := resize(t3(2).im - t3(4).im, v3, fixed_wrap, fixed_truncate);
 			v4 := resize(t3(1).im - t3(3).im, v4, fixed_wrap, fixed_truncate);
 
-			o_X0.im <= resize(shift_right(resize(v0 + v_half, v0, fixed_wrap, fixed_truncate), v_shift), o_X0.im, fixed_wrap, fixed_truncate);
-			o_X1.im <= resize(shift_right(resize(v1 + v_half, v1, fixed_wrap, fixed_truncate), v_shift), o_X1.im, fixed_wrap, fixed_truncate);
-			o_X2.im <= resize(shift_right(resize(v2 + v_half, v2, fixed_wrap, fixed_truncate), v_shift), o_X2.im, fixed_wrap, fixed_truncate);
-			o_X3.im <= resize(shift_right(resize(v3 + v_half, v3, fixed_wrap, fixed_truncate), v_shift), o_X3.im, fixed_wrap, fixed_truncate);
-			o_X4.im <= resize(shift_right(resize(v4 + v_half, v4, fixed_wrap, fixed_truncate), v_shift), o_X4.im, fixed_wrap, fixed_truncate);
+			o_X0.im <= f_exit_round(v0, i_s0);
+			o_X1.im <= f_exit_round(v1, i_s0);
+			o_X2.im <= f_exit_round(v2, i_s0);
+			o_X3.im <= f_exit_round(v3, i_s0);
+			o_X4.im <= f_exit_round(v4, i_s0);
 		end process PROC_CALC_235;
 	end generate GEN_235;
 
@@ -245,8 +264,6 @@ begin
 			variable t1_add0, t1_add1       : t_cmplx_wide;
 			variable t1_2                   : t_cmplx_prod;
 			variable t2                     : t_cmplx_prod_array;
-			variable v_shift                : natural range 1 to 2;
-			variable v_half                 : t_acc;
 			variable v0, v1, v2             : t_acc;
 		begin
 			-- Stage 0 (exact, wide)
@@ -272,8 +289,9 @@ begin
 			r1.im := resize(t0(2).re * c_k6.im + t0(2).im * c_k6.re + c_prod_half, r1.im, fixed_wrap, fixed_truncate);
 
 			-- trim + multiplication by j
-			t1_2.re := resize(-resize(r1.im, c_fxp_prod_int_width - 1, -c_fxp_prod_frac_width, fixed_wrap, fixed_truncate), t1_2.re, fixed_wrap, fixed_truncate);
 			t1_2.im := resize(r1.re, t1_2.im, fixed_wrap, fixed_truncate);
+			t1_2.re := resize(r1.im, t1_2.re, fixed_wrap, fixed_truncate);
+			t1_2.re := resize(-t1_2.re, t1_2.re, fixed_wrap, fixed_truncate);
 
 			-- Stage 2 (exact, prod word)
 			t2(0).re := resize(t1_add0.re, t2(0).re, fixed_wrap, fixed_truncate);
@@ -285,21 +303,16 @@ begin
 			t2(2).re := resize(t2(3).re - t1_2.re, t2(2).re, fixed_wrap, fixed_truncate);
 			t2(2).im := resize(t2(3).im - t1_2.im, t2(2).im, fixed_wrap, fixed_truncate);
 
-			-- Stage output: fused scaling-shift/half-up exit rounding
-			case i_s0(0) is
-				when '0'    => v_shift := 1; v_half := c_exit_half_1;  -- radix-2
-				when others => v_shift := 2; v_half := c_exit_half_2;  -- radix-3
-			end case;
-
+			-- Stage output: selection + fused shift/half-up exit rounding
 			v0 := resize(t2(0).re, v0);
 			case i_s0(0) is
 				when '0'    => v1 := resize(t2(3).re, v1);
 				when others => v1 := resize(t2(1).re, v1);
 			end case;
 			v2 := resize(t2(2).re, v2);
-			o_X0.re <= resize(shift_right(resize(v0 + v_half, v0, fixed_wrap, fixed_truncate), v_shift), o_X0.re, fixed_wrap, fixed_truncate);
-			o_X1.re <= resize(shift_right(resize(v1 + v_half, v1, fixed_wrap, fixed_truncate), v_shift), o_X1.re, fixed_wrap, fixed_truncate);
-			o_X2.re <= resize(shift_right(resize(v2 + v_half, v2, fixed_wrap, fixed_truncate), v_shift), o_X2.re, fixed_wrap, fixed_truncate);
+			o_X0.re <= f_exit_round(v0, '0' & i_s0(0));
+			o_X1.re <= f_exit_round(v1, '0' & i_s0(0));
+			o_X2.re <= f_exit_round(v2, '0' & i_s0(0));
 
 			v0 := resize(t2(0).im, v0);
 			case i_s0(0) is
@@ -307,16 +320,16 @@ begin
 				when others => v1 := resize(t2(1).im, v1);
 			end case;
 			v2 := resize(t2(2).im, v2);
-			o_X0.im <= resize(shift_right(resize(v0 + v_half, v0, fixed_wrap, fixed_truncate), v_shift), o_X0.im, fixed_wrap, fixed_truncate);
-			o_X1.im <= resize(shift_right(resize(v1 + v_half, v1, fixed_wrap, fixed_truncate), v_shift), o_X1.im, fixed_wrap, fixed_truncate);
-			o_X2.im <= resize(shift_right(resize(v2 + v_half, v2, fixed_wrap, fixed_truncate), v_shift), o_X2.im, fixed_wrap, fixed_truncate);
+			o_X0.im <= f_exit_round(v0, '0' & i_s0(0));
+			o_X1.im <= f_exit_round(v1, '0' & i_s0(0));
+			o_X2.im <= f_exit_round(v2, '0' & i_s0(0));
 		end process PROC_CALC_23;
 	end generate GEN_23;
 
 	GEN_2: if G_CAPABILITY = 0 and not G_PIPELINE generate
 		PROC_CALC_2: process(input_x0_wide, input_x1_wide)
-			variable t1                 : t_cmplx_wide_array;
-			variable v0, v1             : t_acc;
+			variable t1     : t_cmplx_wide_array;
+			variable v0, v1 : t_acc;
 		begin
 			-- Stage 1 (exact, wide)
 			t1(0) := input_x0_wide + input_x1_wide;
@@ -326,13 +339,13 @@ begin
 			-- exit rounding
 			v0 := resize(t1(0).re, v0);
 			v1 := resize(t1(1).re, v1);
-			o_X0.re <= resize(shift_right(resize(v0 + c_exit_half_1, v0, fixed_wrap, fixed_truncate), 1), o_X0.re, fixed_wrap, fixed_truncate);
-			o_X1.re <= resize(shift_right(resize(v1 + c_exit_half_1, v1, fixed_wrap, fixed_truncate), 1), o_X1.re, fixed_wrap, fixed_truncate);
+			o_X0.re <= f_exit_round(v0, "00");
+			o_X1.re <= f_exit_round(v1, "00");
 
 			v0 := resize(t1(0).im, v0);
 			v1 := resize(t1(1).im, v1);
-			o_X0.im <= resize(shift_right(resize(v0 + c_exit_half_1, v0, fixed_wrap, fixed_truncate), 1), o_X0.im, fixed_wrap, fixed_truncate);
-			o_X1.im <= resize(shift_right(resize(v1 + c_exit_half_1, v1, fixed_wrap, fixed_truncate), 1), o_X1.im, fixed_wrap, fixed_truncate);
+			o_X0.im <= f_exit_round(v0, "00");
+			o_X1.im <= f_exit_round(v1, "00");
 		end process PROC_CALC_2;
 	end generate GEN_2;
 
@@ -424,8 +437,9 @@ begin
 			if rising_edge(i_clk) then
 				case i_s1 is
 					when '0' => -- mul with j
-						t2(2).re := resize(-resize(r1_r.im, c_fxp_prod_int_width - 1, -c_fxp_prod_frac_width, fixed_wrap, fixed_truncate), t2(2).re, fixed_wrap, fixed_truncate);
 						t2(2).im := resize(r1_r.re, t2(2).im, fixed_wrap, fixed_truncate);
+						t2(2).re := resize(r1_r.im, t2(2).re, fixed_wrap, fixed_truncate);
+						t2(2).re := resize(-t2(2).re, t2(2).re, fixed_wrap, fixed_truncate);
 					when '1' => -- passthrough
 						t2(2).re := resize(r1_r.re, t2(2).re, fixed_wrap, fixed_truncate);
 						t2(2).im := resize(r1_r.im, t2(2).im, fixed_wrap, fixed_truncate);
@@ -463,16 +477,8 @@ begin
 
 		-- output stage (combinational): selection sums + fused shift/round
 		PROC_STAGE_D: process(t3_r, i_s0, i_s1)
-			variable v_shift            : natural range 1 to 3;
-			variable v_half             : t_acc;
 			variable v0, v1, v2, v3, v4 : t_acc;
 		begin
-			case i_s0 is
-				when "00"   => v_shift := 1; v_half := c_exit_half_1;  -- radix-2
-				when "01"   => v_shift := 2; v_half := c_exit_half_2;  -- radix-3
-				when others => v_shift := 3; v_half := c_exit_half_3;  -- radix-5
-			end case;
-
 			v0 := resize(t3_r(0).re, v0);
 			case i_s0 is
 				when "00"   => v1 := resize(t3_r(5).re, v1);
@@ -486,11 +492,11 @@ begin
 			v3 := resize(t3_r(2).re - t3_r(4).re, v3, fixed_wrap, fixed_truncate);
 			v4 := resize(t3_r(1).re - t3_r(3).re, v4, fixed_wrap, fixed_truncate);
 
-			o_X0.re <= resize(shift_right(resize(v0 + v_half, v0, fixed_wrap, fixed_truncate), v_shift), o_X0.re, fixed_wrap, fixed_truncate);
-			o_X1.re <= resize(shift_right(resize(v1 + v_half, v1, fixed_wrap, fixed_truncate), v_shift), o_X1.re, fixed_wrap, fixed_truncate);
-			o_X2.re <= resize(shift_right(resize(v2 + v_half, v2, fixed_wrap, fixed_truncate), v_shift), o_X2.re, fixed_wrap, fixed_truncate);
-			o_X3.re <= resize(shift_right(resize(v3 + v_half, v3, fixed_wrap, fixed_truncate), v_shift), o_X3.re, fixed_wrap, fixed_truncate);
-			o_X4.re <= resize(shift_right(resize(v4 + v_half, v4, fixed_wrap, fixed_truncate), v_shift), o_X4.re, fixed_wrap, fixed_truncate);
+			o_X0.re <= f_exit_round(v0, i_s0);
+			o_X1.re <= f_exit_round(v1, i_s0);
+			o_X2.re <= f_exit_round(v2, i_s0);
+			o_X3.re <= f_exit_round(v3, i_s0);
+			o_X4.re <= f_exit_round(v4, i_s0);
 
 			v0 := resize(t3_r(0).im, v0);
 			case i_s0 is
@@ -505,11 +511,11 @@ begin
 			v3 := resize(t3_r(2).im - t3_r(4).im, v3, fixed_wrap, fixed_truncate);
 			v4 := resize(t3_r(1).im - t3_r(3).im, v4, fixed_wrap, fixed_truncate);
 
-			o_X0.im <= resize(shift_right(resize(v0 + v_half, v0, fixed_wrap, fixed_truncate), v_shift), o_X0.im, fixed_wrap, fixed_truncate);
-			o_X1.im <= resize(shift_right(resize(v1 + v_half, v1, fixed_wrap, fixed_truncate), v_shift), o_X1.im, fixed_wrap, fixed_truncate);
-			o_X2.im <= resize(shift_right(resize(v2 + v_half, v2, fixed_wrap, fixed_truncate), v_shift), o_X2.im, fixed_wrap, fixed_truncate);
-			o_X3.im <= resize(shift_right(resize(v3 + v_half, v3, fixed_wrap, fixed_truncate), v_shift), o_X3.im, fixed_wrap, fixed_truncate);
-			o_X4.im <= resize(shift_right(resize(v4 + v_half, v4, fixed_wrap, fixed_truncate), v_shift), o_X4.im, fixed_wrap, fixed_truncate);
+			o_X0.im <= f_exit_round(v0, i_s0);
+			o_X1.im <= f_exit_round(v1, i_s0);
+			o_X2.im <= f_exit_round(v2, i_s0);
+			o_X3.im <= f_exit_round(v3, i_s0);
+			o_X4.im <= f_exit_round(v4, i_s0);
 		end process PROC_STAGE_D;
 	end generate GEN_235_PIPE;
 
@@ -563,8 +569,9 @@ begin
 			variable t2 : t_cmplx_prod_array;
 		begin
 			if rising_edge(i_clk) then
-				t1_2.re := resize(-resize(r1_r.im, c_fxp_prod_int_width - 1, -c_fxp_prod_frac_width, fixed_wrap, fixed_truncate), t1_2.re, fixed_wrap, fixed_truncate);
 				t1_2.im := resize(r1_r.re, t1_2.im, fixed_wrap, fixed_truncate);
+				t1_2.re := resize(r1_r.im, t1_2.re, fixed_wrap, fixed_truncate);
+				t1_2.re := resize(-t1_2.re, t1_2.re, fixed_wrap, fixed_truncate);
 
 				t2(0).re := resize(t1_add0_r.re, t2(0).re, fixed_wrap, fixed_truncate);
 				t2(0).im := resize(t1_add0_r.im, t2(0).im, fixed_wrap, fixed_truncate);
@@ -581,24 +588,17 @@ begin
 
 		-- output stage (combinational): selection + fused shift/round
 		PROC_STAGE_D: process(t2_r, i_s0)
-			variable v_shift    : natural range 1 to 2;
-			variable v_half     : t_acc;
 			variable v0, v1, v2 : t_acc;
 		begin
-			case i_s0(0) is
-				when '0'    => v_shift := 1; v_half := c_exit_half_1;  -- radix-2
-				when others => v_shift := 2; v_half := c_exit_half_2;  -- radix-3
-			end case;
-
 			v0 := resize(t2_r(0).re, v0);
 			case i_s0(0) is
 				when '0'    => v1 := resize(t2_r(3).re, v1);
 				when others => v1 := resize(t2_r(1).re, v1);
 			end case;
 			v2 := resize(t2_r(2).re, v2);
-			o_X0.re <= resize(shift_right(resize(v0 + v_half, v0, fixed_wrap, fixed_truncate), v_shift), o_X0.re, fixed_wrap, fixed_truncate);
-			o_X1.re <= resize(shift_right(resize(v1 + v_half, v1, fixed_wrap, fixed_truncate), v_shift), o_X1.re, fixed_wrap, fixed_truncate);
-			o_X2.re <= resize(shift_right(resize(v2 + v_half, v2, fixed_wrap, fixed_truncate), v_shift), o_X2.re, fixed_wrap, fixed_truncate);
+			o_X0.re <= f_exit_round(v0, '0' & i_s0(0));
+			o_X1.re <= f_exit_round(v1, '0' & i_s0(0));
+			o_X2.re <= f_exit_round(v2, '0' & i_s0(0));
 
 			v0 := resize(t2_r(0).im, v0);
 			case i_s0(0) is
@@ -606,9 +606,9 @@ begin
 				when others => v1 := resize(t2_r(1).im, v1);
 			end case;
 			v2 := resize(t2_r(2).im, v2);
-			o_X0.im <= resize(shift_right(resize(v0 + v_half, v0, fixed_wrap, fixed_truncate), v_shift), o_X0.im, fixed_wrap, fixed_truncate);
-			o_X1.im <= resize(shift_right(resize(v1 + v_half, v1, fixed_wrap, fixed_truncate), v_shift), o_X1.im, fixed_wrap, fixed_truncate);
-			o_X2.im <= resize(shift_right(resize(v2 + v_half, v2, fixed_wrap, fixed_truncate), v_shift), o_X2.im, fixed_wrap, fixed_truncate);
+			o_X0.im <= f_exit_round(v0, '0' & i_s0(0));
+			o_X1.im <= f_exit_round(v1, '0' & i_s0(0));
+			o_X2.im <= f_exit_round(v2, '0' & i_s0(0));
 		end process PROC_STAGE_D;
 	end generate GEN_23_PIPE;
 
@@ -623,13 +623,13 @@ begin
 
 				v0 := resize(t1(0).re, v0);
 				v1 := resize(t1(1).re, v1);
-				o_X0.re <= resize(shift_right(resize(v0 + c_exit_half_1, v0, fixed_wrap, fixed_truncate), 1), o_X0.re, fixed_wrap, fixed_truncate);
-				o_X1.re <= resize(shift_right(resize(v1 + c_exit_half_1, v1, fixed_wrap, fixed_truncate), 1), o_X1.re, fixed_wrap, fixed_truncate);
+				o_X0.re <= f_exit_round(v0, "00");
+				o_X1.re <= f_exit_round(v1, "00");
 
 				v0 := resize(t1(0).im, v0);
 				v1 := resize(t1(1).im, v1);
-				o_X0.im <= resize(shift_right(resize(v0 + c_exit_half_1, v0, fixed_wrap, fixed_truncate), 1), o_X0.im, fixed_wrap, fixed_truncate);
-				o_X1.im <= resize(shift_right(resize(v1 + c_exit_half_1, v1, fixed_wrap, fixed_truncate), 1), o_X1.im, fixed_wrap, fixed_truncate);
+				o_X0.im <= f_exit_round(v0, "00");
+				o_X1.im <= f_exit_round(v1, "00");
 			end if;
 		end process PROC_STAGE_A;
 	end generate GEN_2_PIPE;

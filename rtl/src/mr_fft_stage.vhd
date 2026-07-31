@@ -27,24 +27,20 @@ entity mr_fft_stage is
 		i_clk : in  std_logic;
     i_reset : in  std_logic;
 
-    i_config : in  t_config;
-
-    -- index of the current config within G_CONFIGS (selects the twiddle-ROM
-    -- block); switch it together with i_config
+    -- The ONLY configuration input: index of the current config within
+    -- G_CONFIGS. Everything per-config -- radix, runtime delay (size/radix,
+    -- wrapped modular encoding), twiddle-ROM block and the BYPASS flag (a
+    -- (radix<2) G_CONFIGS entry passes samples straight to the output skid,
+    -- core idle) -- is derived from it via elaboration-time tables.
     i_config_sel : in std_logic_vector(clogb2(G_CONFIGS'length) - 1 downto 0) := (others => '0');
-
-    -- runtime delay (size/radix) for the current config. NOTE: when the value
-    -- equals 2**width it wraps to 0; the -1 compares below still work by
-    -- modular arithmetic.
-    i_config_delay : in std_logic_vector(clogb2(get_delay_cnt(G_CONFIGS)) - 1 downto 0);
 
     -- Reconfiguration needs NO reset: after a whole number of frames has been
     -- fed and all outputs have been drained (output beats = input beats), the
     -- stage sits in its reset-equivalent state -- both counter pairs wrapped
-    -- to (0,0), pending clear, FIFOs empty -- so (i_config, i_config_delay)
-    -- may then change to ANY config. Contract: don't offer the next config's
-    -- samples before switching the config, and don't switch while the final
-    -- drain is still running.
+    -- to (0,0), pending clear, FIFOs empty -- so i_config_sel may then change
+    -- to ANY config (bypass included: it leaves nothing in flight). Contract:
+    -- don't offer the next config's samples before switching, and don't
+    -- switch while the final drain is still running.
 
     -- Input and output flows are fully DECOUPLED (separate phase/delay
     -- counters). Delay FIFOs hold only input samples; the (pipelined)
@@ -114,6 +110,34 @@ architecture rtl of mr_fft_stage is
 
   signal input_sample : t_cmplx;
 
+  -- ------------------------------------------------------------------
+  -- Per-config parameters, all derived from i_config_sel (quasi-static).
+  -- The delay uses the wrapped modular encoding: a delay equal to
+  -- 2**width reads as 0 and the -1 compares still work.
+  -- ------------------------------------------------------------------
+  constant C_NUM_CFGS : natural := G_CONFIGS'length;
+
+  type t_delay_tbl is array (0 to C_NUM_CFGS - 1) of
+    std_logic_vector(clogb2(C_DELAY_CNT) - 1 downto 0);
+
+  function f_delay_tbl return t_delay_tbl is
+    variable t : t_delay_tbl;
+    variable c : t_config;
+  begin
+    for i in 0 to C_NUM_CFGS - 1 loop
+      c := G_CONFIGS(G_CONFIGS'low + i);
+      t(i) := std_logic_vector(to_unsigned(
+          (c.size / c.radix) mod 2**(clogb2(C_DELAY_CNT)), clogb2(C_DELAY_CNT)));
+    end loop;
+    return t;
+  end function f_delay_tbl;
+
+  constant C_DELAY_TBL : t_delay_tbl := f_delay_tbl;
+
+  signal cfg_idx      : natural range 0 to C_NUM_CFGS - 1;
+  -- initialized so time-zero delta cycles never see radix = 0 (natural'left)
+  signal config       : t_config := G_CONFIGS(G_CONFIGS'low);
+  signal bypass       : std_logic;     -- selected entry is a (radix<2) bypass
   signal config_delay : std_logic_vector(clogb2(C_DELAY_CNT) - 1 downto 0);
   -- quasi-static "delay - 1" (block-boundary compare value), registered so
   -- the decrementer sits outside every per-beat comparison
@@ -170,6 +194,7 @@ architecture rtl of mr_fft_stage is
   signal in_last     : std_logic;
   signal o_ready_int : std_logic;
   signal in_beat     : std_logic;   -- input sample accepted
+  signal core_beat   : std_logic;   -- in_beat seen by the core ('0' in bypass)
   signal joint_beat  : std_logic;   -- last-phase beat: butterfly issued
   signal o_valid_int : std_logic;
   signal drain_beat  : std_logic;   -- stored result popped to the output
@@ -187,6 +212,8 @@ architecture rtl of mr_fft_stage is
   signal rot_word    : t_cmplx;
   signal rot_exp     : integer range 0 to C_MAX_SIZE - 1;
   signal rot_exp_slv : std_logic_vector(C_TW_K_W - 1 downto 0);
+  signal rot_out_valid : std_logic;
+  signal rot_out_data  : t_cmplx;
   -- twiddle-alignment shift register (depth = the ROM's read latency)
   type t_rot_align is array (1 to C_TW_LAT) of t_cmplx;
   signal rot_word_d : t_rot_align;
@@ -216,13 +243,16 @@ architecture rtl of mr_fft_stage is
   signal out_cnt_radix : std_logic_vector(clogb2(C_MAX_RADIX) - 1 downto 0);
 begin
 
-  in_last <= '1' when to_integer(unsigned(phase)) = i_config.radix - 1 else '0';
+  in_last <= '1' when to_integer(unsigned(phase)) = config.radix - 1 else '0';
 
   o_ready <= o_ready_int;
   o_valid <= o_valid_int;
 
   in_beat    <= i_valid and o_ready_int;
-  joint_beat <= in_beat and in_last;
+  -- in bypass the accepted sample goes straight to the output skid; the core
+  -- must see no beats so its counters/FIFOs stay in the drained state
+  core_beat  <= in_beat and not bypass;
+  joint_beat <= core_beat and in_last;
 
   -- ==================================================================
   -- Rotator (common to both flows): registered pre-rotation word times
@@ -239,7 +269,9 @@ begin
       if i_reset = '1' then
         out_credit <= 0;
       else
-        v_inc := rot_beat = '1';
+        -- launch = a word committed toward the skid: a rotator-pipeline beat
+        -- (normal flows) or a direct bypass write
+        v_inc := rot_beat = '1' or (bypass = '1' and in_beat = '1');
         v_dec := o_valid_int = '1' and i_ready = '1';
         if v_inc and not v_dec then
           out_credit <= out_credit + 1;
@@ -282,15 +314,19 @@ begin
         i_valid   => rot_v_d(C_TW_LAT),
         i_sample  => rot_word_d(C_TW_LAT),
         i_twiddle => twiddle,
-        o_valid   => skid_we,
-        o_sample  => skid_data
+        o_valid   => rot_out_valid,
+        o_sample  => rot_out_data
       );
+    
   else generate
     -- delay-1-only stage: W = 1 -- no ROM, no rotator, no data register;
     -- the beat writes the word directly into the skid
-    skid_we   <= rot_beat;
-    skid_data <= rot_word;
+    rot_out_valid <= rot_beat;
+    rot_out_data  <= rot_word;
   end generate GEN_ROT_MULT;
+
+  skid_we <= rot_out_valid when bypass = '0' else in_beat;
+  skid_data <= rot_out_data when bypass = '0' else input_sample;
 
   SKID_INST: entity work.mr_fft_fifo
     generic map (
@@ -321,18 +357,22 @@ begin
   begin
 
     -- output-side counters walk all radix result blocks X0..X_{r-1}
-    out_cnt_radix <= std_logic_vector(to_unsigned(i_config.radix, clogb2(C_MAX_RADIX)));
+    out_cnt_radix <= std_logic_vector(to_unsigned(config.radix, clogb2(C_MAX_RADIX)));
 
     res_credit_ok <= '1' when res_outstanding < C_RESULT_DEPTH else '0';
 
     -- fill phases: accept while the target delay FIFO has space; joint
     -- phase: accept while the result FIFOs have credit. i_ready is NOT
     -- involved.
-    PROC_O_READY: process(in_last, res_credit_ok, fifos_full, phase)
+    PROC_O_READY: process(bypass, out_credit_ok, in_last, res_credit_ok, fifos_full, phase)
       variable v_idx : integer;
     begin
       v_idx := to_integer(unsigned(phase));
-      if in_last = '1' then
+      if bypass = '1' then
+        -- bypass: accept whenever the skid has credit (registered state, so
+        -- still no combinational i_ready -> o_ready path)
+        o_ready_int <= out_credit_ok;
+      elsif in_last = '1' then
         o_ready_int <= res_credit_ok;
       elsif v_idx < C_NUM_FIFOS then
         o_ready_int <= not fifos_full(v_idx);
@@ -361,6 +401,9 @@ begin
     -- guarantees it has somewhere to land; i_ready only drains the skid)
     drain_beat <= res_head_valid and out_credit_ok;
 
+    -- bypass beats must NOT enter the rotator pipeline: its valid shift
+    -- register would still be draining after a (legal) bypass -> active
+    -- switch and write stale garbage into the skid uncounted
     rot_beat <= drain_beat;
     rot_word <= res_head_word;
 
@@ -392,7 +435,7 @@ begin
         else
           v_inc := joint_beat = '1';
           v_dec := drain_beat = '1' and
-                   to_integer(unsigned(out_phase)) = i_config.radix - 1;
+                   to_integer(unsigned(out_phase)) = config.radix - 1;
           if v_inc and not v_dec then
             res_outstanding <= res_outstanding + 1;
           elsif v_dec and not v_inc then
@@ -423,7 +466,7 @@ begin
     GEN_FIFOS_DATA_IN: for i in 0 to C_NUM_FIFOS - 1 generate
       fifos_data_in(i) <= input_demux_out(i);
     end generate GEN_FIFOS_DATA_IN;
-    fifos_we_g <= fifos_we when (in_beat = '1' and in_last = '0') else (others => '0');
+    fifos_we_g <= fifos_we when (core_beat = '1' and in_last = '0') else (others => '0');
     fifos_re_g <= radix_mask when joint_beat = '1' else (others => '0');
 
     -- result-FIFO enables: writes when the preadder results land (X0 always,
@@ -462,9 +505,9 @@ begin
   begin
 
     -- output-side counters walk the single stored block (X1)
-    out_cnt_radix <= std_logic_vector(to_unsigned(i_config.radix - 1, clogb2(C_MAX_RADIX)));
-
-    o_ready_int <= (out_credit_ok and not pending) when in_last = '1'
+    out_cnt_radix <= std_logic_vector(to_unsigned(config.radix - 1, clogb2(C_MAX_RADIX)));
+    o_ready_int <= out_credit_ok when bypass = '1'
+                   else (out_credit_ok and not pending) when in_last = '1'
                    else not fifos_full(0);
     drain_beat  <= pending and out_credit_ok;
 
@@ -511,7 +554,7 @@ begin
     -- the FIFO takes the input sample during the fill phase and the X1
     -- write-back during the joint phase; joint pops (preadder input) and
     -- drain pops (into the skid) are mutually exclusive via pending
-    fifos_we_g(0)    <= in_beat;
+    fifos_we_g(0)    <= core_beat;
     fifos_data_in(0) <= preadder_outputs(1) when in_last = '1' else input_demux_out(0);
     fifos_re_g(0)    <= joint_beat or drain_beat;
 
@@ -654,7 +697,12 @@ begin
       o_X4 => preadder_outputs(4)
     );
 
-  config_delay <= i_config_delay;
+  -- config lookup (quasi-static; clamp defends against a sel code beyond
+  -- G_CONFIGS'length during bring-up)
+  cfg_idx      <= minimum(to_integer(unsigned(i_config_sel)), C_NUM_CFGS - 1);
+  config       <= G_CONFIGS(G_CONFIGS'low + cfg_idx);
+  bypass       <= '1' when config.radix < 2 else '0';
+  config_delay <= C_DELAY_TBL(cfg_idx);
 
   PROC_DELAY_LAST: process(i_clk)
   begin
@@ -674,9 +722,9 @@ begin
       i_clk => i_clk,
       i_reset => i_reset,
 
-      i_config_radix => std_logic_vector(to_unsigned(i_config.radix, clogb2(C_MAX_RADIX))),
+      i_config_radix => std_logic_vector(to_unsigned(config.radix, clogb2(C_MAX_RADIX))),
       i_config_delay => config_delay,
-      i_en => in_beat,
+      i_en => core_beat,
 
       o_phase => phase,
       o_delay_cnt => delay_cnt
@@ -736,7 +784,7 @@ begin
       i_clk => i_clk,
       i_reset => i_reset,
 
-      i_config => i_config,
+      i_config => config,
 
       i_phase => phase,
 
