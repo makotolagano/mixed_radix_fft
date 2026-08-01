@@ -79,6 +79,7 @@ begin
 		-- big twiddle tables (radix2/radix23 slots) go to block RAM; the small
 		-- radix235 ones stay in LUTs
 		constant C_ROM_BLOCK : boolean := C_CAP /= 2;
+		constant C_FIFO_RAM_STYLE : string := f_ram_style(get_delay_cnt(C_CFGS));
 	begin
 
 		GEN_STAGE_BRAM_ROM: if C_ROM_BLOCK generate
@@ -87,7 +88,8 @@ begin
 					G_CAPABILITY        => C_CAP,
 					G_CONFIGS           => C_CFGS,
 					G_PIPELINE          => G_PIPELINE,
-					G_TWIDDLE_ROM_STYLE => "block"
+					G_TWIDDLE_ROM_STYLE => "block",
+					G_FIFO_RAM_STYLE    => C_FIFO_RAM_STYLE
 				)
 				port map (
 					i_clk    => i_clk,
@@ -108,7 +110,8 @@ begin
 					G_CAPABILITY        => C_CAP,
 					G_CONFIGS           => C_CFGS,
 					G_PIPELINE          => G_PIPELINE,
-					G_TWIDDLE_ROM_STYLE => "auto"
+					G_TWIDDLE_ROM_STYLE => "auto",
+					G_FIFO_RAM_STYLE    => C_FIFO_RAM_STYLE
 				)
 				port map (
 					i_clk    => i_clk,

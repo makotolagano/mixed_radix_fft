@@ -10,7 +10,8 @@ use work.mr_fft_pkg.all;
 -- presents the oldest sample (o_rd_valid flags it), i_rd_en pops it.
 entity mr_fft_fifo is
 	generic (
-		G_DEPTH 		 : integer := 1024
+		G_DEPTH 		 : integer := 1024;
+    G_RAM_STYLE  : string := "auto"
 	);
 	port (
 		i_clk 		: in std_logic;
@@ -42,7 +43,8 @@ begin
 	FIFO_INST: entity work.fifo_fwft
     generic map (
       G_DATA_WIDTH => C_FIFO_DATA_WIDTH,
-      G_DEPTH => G_DEPTH
+      G_DEPTH => G_DEPTH,
+      G_RAM_STYLE => G_RAM_STYLE
     )
     port map (
       i_clk 		=> i_clk,

@@ -20,7 +20,8 @@ use ieee.numeric_std.all;
 entity fifo_fwft is
 	generic (
 		G_DATA_WIDTH : integer := 36;
-		G_DEPTH 		 : integer := 1024
+		G_DEPTH      : integer := 1024;
+		G_RAM_STYLE  : string := "auto"
 	);
 	port (
 		i_clk 		: in std_logic;
@@ -57,8 +58,12 @@ architecture rtl of fifo_fwft is
 	constant C_ADDR_W : integer := clogb2(G_DEPTH);      -- address bits
 	constant C_CNT_W  : integer := clogb2(G_DEPTH + 1);  -- occupancy 0..G_DEPTH
 
+
 	type t_mem is array (0 to G_DEPTH-1) of std_logic_vector(G_DATA_WIDTH-1 downto 0);
 	signal fifo_mem : t_mem;
+
+	attribute ram_style : string;
+	attribute ram_style of fifo_mem : signal is G_RAM_STYLE;
 
 	-- Pointers wrap at G_DEPTH (not necessarily a power of two); mem_cnt is
 	-- the number of words in the memory (head/mid/rd_q are extra capacity).

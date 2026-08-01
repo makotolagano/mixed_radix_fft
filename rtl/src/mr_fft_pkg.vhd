@@ -61,6 +61,19 @@ package mr_fft_pkg is
 	function f_num_configs return natural;
 	-- supported FFT lengths, ascending; index = config index (i_config_sel)
 	function f_fft_sizes return t_nat_arr;
+	-- final-scaler constants, index-aligned with f_fft_sizes: code =
+	-- round(2**c_scale_frac * 2**total_shift / N), the residual gain that
+	-- turns the chain output X*2**(-total_shift) into the X/N convention.
+	-- Under the FIXED schedule c = (4/3)**#3s * (8/5)**#5s, ranging from 4/3
+	-- up to ~5.7 -- hence the s4.21 format (4 int bits incl sign, +-8). At
+	-- 21 fraction bits the constant's relative error is ~-135 dB, far below
+	-- every measured config (an 18-bit constant would sit ABOVE the best
+	-- ones). The 25-bit code rides the DSP A port; the data word takes the
+	-- 18-bit B port. Round-to-nearest is unambiguous: every supported N has
+	-- a factor 3, so 2**x/N is never an exact half-integer.
+	constant c_scale_int  : natural := 4;
+	constant c_scale_frac : natural := 21;
+	function f_fft_scales return t_nat_arr;
 	-- minimal slot counts for the mid-bypass pipeline layout
 	-- (docs/reconfigurable_fft_midbypass_architecture.md section 2):
 	-- radix235 = max(#5s), radix23 = max(#3s+#5s) - radix235,
@@ -72,6 +85,7 @@ package mr_fft_pkg is
 	-- capability of a pipeline slot (G_CAPABILITY encoding: 0=radix2,
 	-- 1=radix23, 2=radix235); radix2 slots first, then radix23, then radix235
 	function f_slot_capability(slot : natural) return natural;
+	function f_ram_style(depth : natural) return string;
 	-- (radix, size) of every config at one pipeline slot; bypassed configs
 	-- get (radix=>1, size=>1). Use as G_CONFIGS of the stage at that slot.
 	function f_slot_configs(slot : natural) return t_config_arr;
@@ -317,6 +331,20 @@ package body mr_fft_pkg is
 		return sizes;
 	end function f_fft_sizes;
 
+	function f_fft_scales return t_nat_arr is
+		constant sizes : t_nat_arr := f_fft_sizes;
+		variable t     : t_nat_arr(sizes'range);
+		variable sh    : natural;
+	begin
+		for i in sizes'range loop
+			-- fixed scaling schedule: 1 bit per radix-2, 2 per radix-3, 3 per radix-5
+			sh := f_count_factor(sizes(i), 2) + 2 * f_count_factor(sizes(i), 3)
+			      + 3 * f_count_factor(sizes(i), 5);
+			t(i) := natural(round(2.0 ** c_scale_frac * 2.0 ** sh / real(sizes(i))));
+		end loop;
+		return t;
+	end function f_fft_scales;
+
 	function f_num_r235_slots return natural is
 		constant sizes : t_nat_arr := f_fft_sizes;
 		variable m     : natural   := 0;
@@ -372,6 +400,15 @@ package body mr_fft_pkg is
 			return 2;
 		end if;
 	end function f_slot_capability;
+
+	function f_ram_style(depth : natural) return string is
+	begin
+		if depth >= 128 then
+			return "block";
+		else
+			return "distributed";
+		end if;
+	end function f_ram_style;
 
 	-- Mid-bypass placement: each config's ascending radix list [2..][3..][5..]
 	-- goes to the earliest slot whose capability admits the radix (2: any

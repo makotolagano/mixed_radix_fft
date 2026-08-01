@@ -126,7 +126,11 @@ def run_chain(config, stage_sizes, input_signal, dtype='fxp-s32/12', twiddle_dty
     # fell through to fxpmath's DEFAULT fxp-s16/15 (range +-1, saturate),
     # silently clipping any output bin above 1.0 (caught with a sqrt(2) tone)
     out_dtype = output_dtype or dtype
-    scaler = MixedRadix_FinalScaler_FXP(size=stage_sizes[0], total_shift=total_shift, dtype=out_dtype, output_dtype=out_dtype, rounding=data_rounding)
+    # hardware-faithful scaler: quantized s4.21 constant, wrap (mr_fft_scaler)
+    scaler = MixedRadix_FinalScaler_FXP(size=stage_sizes[0], total_shift=total_shift,
+                                        dtype=out_dtype, output_dtype=out_dtype,
+                                        rounding=data_rounding, overflow='wrap',
+                                        quantized_scale_frac=21)
     print(f"Scale = {str(2**total_shift/stage_sizes[0])}")
 
     for sample in input_signal:

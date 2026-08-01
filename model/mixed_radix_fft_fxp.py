@@ -923,7 +923,8 @@ class MixedRadix_SDF_stage_counter_ctrl_FXP:
 
 
 class MixedRadix_FinalScaler_FXP:
-    def __init__(self, size, total_shift=0, dtype='fxp-s32/12', overflow='saturate', inner_type=None, output_dtype=None, rounding='floor'):
+    def __init__(self, size, total_shift=0, dtype='fxp-s32/12', overflow='saturate', inner_type=None, output_dtype=None, rounding='floor',
+                 quantized_scale_frac=None):
         self.size = int(size)
         self.total_shift = int(total_shift)
         # input arrives on the inner datapath word; the scaled result is the chain
@@ -939,6 +940,15 @@ class MixedRadix_FinalScaler_FXP:
             raise ValueError('size must be >= 1')
 
         self.scale = (2 ** self.total_shift) / self.size
+        # hardware-faithful mode (mr_fft_scaler): multiply by the
+        # ROUND-TO-NEAREST quantized u2.<frac> constant (c_fft_scales), not
+        # the exact real. Ties cannot occur (every supported N has a factor
+        # 3, so 2**x/N is never a half-integer); the product x*c is exact in
+        # float64 (17-bit codes x 24-bit constant), so scale_sample's single
+        # output quantization reproduces the RTL bit-for-bit.
+        if quantized_scale_frac is not None:
+            q = 2.0 ** quantized_scale_frac
+            self.scale = round(self.scale * q) / q
 
     def scale_sample(self, value):
         self.input = self.qz.qc(value)

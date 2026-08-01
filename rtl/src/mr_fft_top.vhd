@@ -20,6 +20,11 @@ use work.mr_fft_cfg_pkg.all;
 --   0x10  CONFIG_ACTIVE RO active (committed) config select
 --   0x14  IN_FLIGHT    RO  input beats minus output beats inside the chain
 --   0x18  FFT_SIZE     RO  N of the ACTIVE config (from c_fft_sizes)
+--   0x1C  SCALE        RO  active final-scaler code (s<c_scale_int>.<c_scale_frac>)
+--
+-- Output convention: the final scaler (mr_fft_scaler) multiplies the chain
+-- output by the active config's residual gain 2**total_shift / N, so
+-- o_sample delivers the classical X/N -- no external rescaling needed.
 --
 -- Configuration protocol (encodes the drained-switch contract in hardware):
 -- writes to CONFIG_SEL land in a shadow register only. Writing CTRL.COMMIT
@@ -93,8 +98,10 @@ architecture rtl of mr_fft_top is
 	constant C_ADDR_CONFIG_ACT : natural := 16#10#;
 	constant C_ADDR_IN_FLIGHT  : natural := 16#14#;
 	constant C_ADDR_FFT_SIZE   : natural := 16#18#;
-	
+	constant C_ADDR_SCALE      : natural := 16#1C#;
+
 	constant C_ZERO_EXT : std_logic_vector(27 downto 0) := (others => '0');
+
 
 	-- generous upper bound on words inside the chain (FIFOs + skids + pipes)
 	constant C_INFLIGHT_W : natural := 16;
@@ -118,6 +125,14 @@ architecture rtl of mr_fft_top is
 	signal in_beat     : std_logic;
 	signal out_beat    : std_logic;
 
+	-- final scaler plumbing; active_scale is registered at commit so the
+	-- constant table sits off every live timing path
+	signal chain_sample : t_cmplx;
+	signal scaler_ready : std_logic;
+	signal scaler_valid : std_logic;
+	signal active_scale : std_logic_vector(c_scale_int + c_scale_frac - 1 downto 0)
+		:= std_logic_vector(to_unsigned(c_fft_scales(0), c_scale_int + c_scale_frac));
+
 	-- frame position tracking (tlast generation / input framing check)
 	signal in_cnt      : unsigned(C_BEAT_W - 1 downto 0);
 	signal out_cnt     : unsigned(C_BEAT_W - 1 downto 0);
@@ -129,15 +144,14 @@ architecture rtl of mr_fft_top is
 	signal arready, rvalid           : std_logic;
 	signal rdata                     : std_logic_vector(31 downto 0);
 	signal wr_beat                   : std_logic;
-	
+
 	signal in_sample : t_cmplx;
 	signal out_sample : t_cmplx;
-
 begin
 
 	in_sample.re <= to_sfixed(i_sample(17 downto 0), in_sample.re);
 	in_sample.im <= to_sfixed(i_sample(35 downto 18), in_sample.im);
-	
+
 	o_sample <= C_ZERO_EXT & to_slv(out_sample.im) & to_slv(out_sample.re);
 
 	-- ------------------------------------------------------------------
@@ -152,8 +166,24 @@ begin
 			i_sample => in_sample,
 			i_valid  => chain_in_valid,
 			o_ready  => chain_ready,
-			o_sample => out_sample,
+			o_sample => chain_sample,
 			o_valid  => chain_valid,
+			i_ready  => scaler_ready
+		);
+
+	-- final scaler: X * 2**(-total_shift) -> X/N via the active config's
+	-- residual-gain constant (c_fft_scales); registered handshake via its
+	-- own credit-gated skid, so the in-flight counter drains through it
+	SCALER_INST: entity work.mr_fft_scaler
+		port map (
+			i_clk    => i_clk,
+			i_reset  => i_reset,
+			i_scale  => active_scale,
+			i_sample => chain_sample,
+			i_valid  => chain_valid,
+			o_ready  => scaler_ready,
+			o_sample => out_sample,
+			o_valid  => scaler_valid,
 			i_ready  => i_ready
 		);
 
@@ -161,10 +191,10 @@ begin
 	chain_in_valid <= i_valid and not commit_pnd;
 	top_ready <= chain_ready and not commit_pnd;
 	o_ready   <= top_ready;
-	o_valid   <= chain_valid;
+	o_valid   <= scaler_valid;
 
 	in_beat  <= i_valid and top_ready;
-	out_beat <= chain_valid and i_ready;
+	out_beat <= scaler_valid and i_ready;
 
 	PROC_IN_FLIGHT: process(i_clk)
 	begin
@@ -246,6 +276,7 @@ begin
 				commit_pnd <= '0';
 				fft_ifft_shadow_sel <= '0';
 				fft_ifft_active_sel <= '0';
+				active_scale <= std_logic_vector(to_unsigned(c_fft_scales(0), c_scale_int + c_scale_frac));
 			else
 				-- shadow write (CONFIG_SEL)
 				if wr_beat = '1' and to_integer(unsigned(s_axi_awaddr)) = C_ADDR_CONFIG_SEL then
@@ -261,6 +292,9 @@ begin
 				if commit_pnd = '1' and in_flight = 0 and in_beat = '0' then
 					active_sel <= shadow_sel;
 					fft_ifft_active_sel <= fft_ifft_shadow_sel;
+					active_scale <= std_logic_vector(to_unsigned(
+					    c_fft_scales(minimum(to_integer(shadow_sel), c_num_configs - 1)),
+					    c_scale_int + c_scale_frac));
 					commit_pnd <= '0';
 				end if;
 			end if;
@@ -337,6 +371,8 @@ begin
 							rdata(C_SEL_W - 1 downto 0) <= std_logic_vector(active_sel);
 						when C_ADDR_IN_FLIGHT =>
 							rdata(C_INFLIGHT_W - 1 downto 0) <= std_logic_vector(in_flight);
+						when C_ADDR_SCALE =>
+							rdata(c_scale_int + c_scale_frac - 1 downto 0) <= active_scale;
 						when C_ADDR_FFT_SIZE =>
 							rdata <= std_logic_vector(to_unsigned(
 							    c_fft_sizes(minimum(to_integer(active_sel), c_num_configs - 1)), 32));

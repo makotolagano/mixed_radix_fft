@@ -21,6 +21,8 @@ package mr_fft_cfg_pkg is
 	constant c_num_configs : natural := f_num_configs;
 	-- supported FFT lengths, ascending; index = config index
 	constant c_fft_sizes : t_nat_arr := f_fft_sizes;
+	-- per-config final-scaler codes (u2.<c_scale_frac>), index-aligned
+	constant c_fft_scales : t_nat_arr := f_fft_scales;
 
 	-- pipeline layout: c_num_r2_slots x radix2 stages, then c_num_r23_slots
 	-- x radix23, then c_num_r235_slots x radix235

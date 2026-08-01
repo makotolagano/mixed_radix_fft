@@ -71,10 +71,6 @@ def sweep_size(n, signal_kind, modes, dtype, twiddle_dtype, coeff_dtype, seed,
     rev = digit_reverse(list(reversed(radices)))
     lsb = 2.0 ** -int(dtype.split('/')[1])
     n_frames = frames if signal_kind in RANDOM_SIGNALS else 1
-    # HARDWARE convention: no output rescaler exists in the RTL, so measure
-    # the raw chain output against fft(x) * 2**(-total_shift) -- this makes
-    # the sweep reproduce PYNQ board measurements exactly
-    ref_scale = 2.0 ** -sum(shift_schedule(radices, scaling))
 
     rows = []
     for mode in modes:
@@ -86,7 +82,10 @@ def sweep_size(n, signal_kind, modes, dtype, twiddle_dtype, coeff_dtype, seed,
         for frame in range(n_frames):
             np.random.seed(seed + frame)
             x = generate_signal(signal_kind, n)
-            np_ref = fft(x) * ref_scale
+            # the RTL now has the on-chip final scaler (mr_fft_scaler), so
+            # the hardware convention IS X/N; run_chain's scaler is the
+            # hardware-faithful quantized one
+            np_ref = fft(x) / n
             _, fxp_out, widths = run_chain(config=radices, stage_sizes=sizes,
                                            input_signal=np.append(x, np.zeros(n)),
                                            dtype=dtype, twiddle_dtype=twiddle_dtype,
@@ -94,7 +93,7 @@ def sweep_size(n, signal_kind, modes, dtype, twiddle_dtype, coeff_dtype, seed,
                                            scaling=scaling,
                                            preadder_exit_round=(preadder_round == 'exit'),
                                            preadder_internal_frac=internal_frac,
-                                           run_fp=False, final_scaler=False)
+                                           run_fp=False, final_scaler=True)
             fxp_ss = fxp_out[lat:lat + n][rev]
             err = np_ref - fxp_ss
             p_sig += float(np.sum(np.abs(np_ref) ** 2))

@@ -21,7 +21,8 @@ entity mr_fft_stage is
     G_PIPELINE : boolean := true;
     -- rom_style for the twiddle table: set "block" on slots with big tables
     -- (Vivado leaves inferred ROMs in LUTs by default), "auto" elsewhere
-    G_TWIDDLE_ROM_STYLE : string := "auto"
+    G_TWIDDLE_ROM_STYLE : string := "auto";
+    G_FIFO_RAM_STYLE    : string := "auto"
 	);
 	port (
 		i_clk : in  std_logic;
@@ -565,7 +566,8 @@ begin
 	GEN_FIFOS: for i in 0 to C_NUM_FIFOS - 1 generate
     FIFO_INST: entity work.mr_fft_fifo
       generic map (
-        G_DEPTH      => C_FIFO_DEPTH
+        G_DEPTH      => C_FIFO_DEPTH,
+        G_RAM_STYLE  => G_FIFO_RAM_STYLE
       )
       port map (
         i_clk     => i_clk,
@@ -586,7 +588,8 @@ begin
     GEN_RESULT_FIFOS: for j in 0 to C_MAX_RADIX - 1 generate
       RESULT_FIFO_INST: entity work.mr_fft_fifo
         generic map (
-          G_DEPTH      => C_RESULT_DEPTH
+          G_DEPTH      => C_RESULT_DEPTH,
+          G_RAM_STYLE  => G_FIFO_RAM_STYLE
         )
         port map (
           i_clk     => i_clk,

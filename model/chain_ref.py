@@ -22,7 +22,10 @@ import argparse
 
 import numpy as np
 
-from mixed_radix_fft_fxp import MixedRadix_SDF_stage_counter_ctrl_FXP
+from mixed_radix_fft_fxp import (MixedRadix_FinalScaler_FXP,
+                                 MixedRadix_SDF_stage_counter_ctrl_FXP)
+
+SCALE_FRAC = 21   # c_scale_frac in mr_fft_pkg.vhd (s4.21 scaler constants)
 
 # small configs that still cover: multiple radix-2 slots, the radix23 region,
 # one and two radix-5 slots, and mid-pipeline bypass gaps between the regions
@@ -73,6 +76,13 @@ def run_cfg(n, codes, data_dtype, coeff_dtype, twiddle_dtype, frac_w):
             preadder_exit_round=True, preadder_internal_frac=22)
         for r, s in zip(radices, sizes)
     ]
+    # final scaler (mr_fft_scaler): x 2**total_shift/N with the quantized
+    # u2.<SCALE_FRAC> constant -- the top's output is the X/N convention
+    total_shift = sum({2: 1, 3: 2, 5: 3}[r] for r in radices)
+    scaler = MixedRadix_FinalScaler_FXP(
+        size=n, total_shift=total_shift, dtype=data_dtype,
+        output_dtype=data_dtype, rounding='half_up', overflow='wrap',
+        quantized_scale_frac=SCALE_FRAC)
 
     scale = 2.0 ** frac_w
     out = []
@@ -80,6 +90,7 @@ def run_cfg(n, codes, data_dtype, coeff_dtype, twiddle_dtype, frac_w):
         y = complex(re / scale, im / scale)
         for st in stages:
             y = st.calculate(y)
+        y = scaler.scale_sample(y)
         out.append((to_code(y.real, frac_w), to_code(y.imag, frac_w)))
 
     lat = sum((r - 1) * (s // r) for r, s in zip(radices, sizes))
