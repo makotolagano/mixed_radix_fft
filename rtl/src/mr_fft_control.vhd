@@ -49,18 +49,21 @@ begin
 	-- Input demux based on the input phase
 	o_input_demux_sel <= i_phase(o_input_demux_sel'length - 1 downto 0);
 
-	PROC_RADIX_MASK: process(i_config.radix)
+	-- registered decode (quasi-static; settle covered by the stage's guard)
+	PROC_RADIX_MASK: process(i_clk)
 	begin
-		case i_config.radix is
-			when 5 =>
-				radix_mask <= std_logic_vector(to_unsigned(2**4-1, G_MAX_RADIX-1));
-			when 3 =>
-				radix_mask <= std_logic_vector(to_unsigned(2**2-1, G_MAX_RADIX-1));
-			when 2 =>
-				radix_mask <= std_logic_vector(to_unsigned(1, G_MAX_RADIX-1));
-			when others =>
-				radix_mask <= (others => '0');
-		end case;
+		if rising_edge(i_clk) then
+			case i_config.radix is
+				when 5 =>
+					radix_mask <= std_logic_vector(to_unsigned(2**4-1, G_MAX_RADIX-1));
+				when 3 =>
+					radix_mask <= std_logic_vector(to_unsigned(2**2-1, G_MAX_RADIX-1));
+				when 2 =>
+					radix_mask <= std_logic_vector(to_unsigned(1, G_MAX_RADIX-1));
+				when others =>
+					radix_mask <= (others => '0');
+			end case;
+		end if;
 	end process PROC_RADIX_MASK;
 
 	PROC_FIFO_WE: process(i_phase)
@@ -72,30 +75,34 @@ begin
 	o_radix_mask <= radix_mask;
 
 	GEN_PREADDER_MUX_CONTROL_235: if G_CAPABILITY = 2 generate
-		-- Output the preadder mux signals based on the configuration
-		PROC_PREADDER_MUX_CONTROL: process(i_config)
+		-- registered like radix_mask
+		PROC_PREADDER_MUX_CONTROL: process(i_clk)
 		begin
-			if (i_config.radix = 5) then
-				o_config_s0 <= "10";
-				o_config_s1 <= '1';
-			elsif (i_config.radix = 3) then
-				o_config_s0 <= "01";
-				o_config_s1 <= '0';
-			else
-				o_config_s0 <= "00";
-				o_config_s1 <= '0';
+			if rising_edge(i_clk) then
+				if (i_config.radix = 5) then
+					o_config_s0 <= "10";
+					o_config_s1 <= '1';
+				elsif (i_config.radix = 3) then
+					o_config_s0 <= "01";
+					o_config_s1 <= '0';
+				else
+					o_config_s0 <= "00";
+					o_config_s1 <= '0';
+				end if;
 			end if;
 		end process PROC_PREADDER_MUX_CONTROL;
 	end generate GEN_PREADDER_MUX_CONTROL_235;
-	
+
 	GEN_PREADDER_MUX_CONTROL_23: if G_CAPABILITY = 1 generate
-		-- Output the preadder mux signals based on the configuration
-		PROC_PREADDER_MUX_CONTROL: process(i_config)
+		-- registered like radix_mask
+		PROC_PREADDER_MUX_CONTROL: process(i_clk)
 		begin
-			if (i_config.radix = 3) then
-				o_config_s0 <= "01";
-			else
-				o_config_s0 <= "00";
+			if rising_edge(i_clk) then
+				if (i_config.radix = 3) then
+					o_config_s0 <= "01";
+				else
+					o_config_s0 <= "00";
+				end if;
 			end if;
 		end process PROC_PREADDER_MUX_CONTROL;
 	end generate GEN_PREADDER_MUX_CONTROL_23;

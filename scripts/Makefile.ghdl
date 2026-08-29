@@ -43,6 +43,7 @@ DESIGN_SRCS := \
 	$(SRC)/mr_fft_phase_delay_gen.vhd \
 	$(SRC)/mr_fft_control.vhd \
 	$(SRC)/mr_fft_stage.vhd \
+	$(SRC)/mr_fft_scaler.vhd \
 	$(SRC)/mr_fft_chain.vhd \
 	$(SRC)/mr_fft_top.vhd \
 	$(SRC)/mr_fft_stage_synth.vhd

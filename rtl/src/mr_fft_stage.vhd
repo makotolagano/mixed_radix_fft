@@ -41,7 +41,9 @@ entity mr_fft_stage is
     -- to (0,0), pending clear, FIFOs empty -- so i_config_sel may then change
     -- to ANY config (bypass included: it leaves nothing in flight). Contract:
     -- don't offer the next config's samples before switching, and don't
-    -- switch while the final drain is still running.
+    -- switch while the final drain is still running. A settle guard holds
+    -- o_ready low for a few cycles after a switch while the registered
+    -- config decode settles.
 
     -- Input and output flows are fully DECOUPLED (separate phase/delay
     -- counters). Delay FIFOs hold only input samples; the (pipelined)
@@ -93,9 +95,9 @@ architecture rtl of mr_fft_stage is
   -- instead of the slow latch output); the rotator then aligns with a second
   -- data register. LUT-ROM stages keep the 1-cycle read.
   constant C_TW_OUT_REG : boolean := G_TWIDDLE_ROM_STYLE = "block";
-  -- twiddle arrival latency after a rot beat (ROM read + optional output reg)
-  -- fold register + address register + BRAM read (+ optional BRAM output reg)
-  constant C_TW_LAT     : natural := 3 + boolean'pos(C_TW_OUT_REG);
+  -- twiddle arrival latency after a rot beat: two fold registers + address
+  -- register + BRAM read + reconstruct register (+ optional BRAM output reg)
+  constant C_TW_LAT     : natural := 5 + boolean'pos(C_TW_OUT_REG);
   -- Rotator pipelining follows the raw G_PIPELINE (NOT C_PIPELINE: capability
   -- 0 keeps its combinational butterfly, but its rotator -- the big radix-2
   -- slots -- is exactly where the DSP pipeline matters).
@@ -134,7 +136,9 @@ architecture rtl of mr_fft_stage is
   end function f_delay_tbl;
 
   constant C_DELAY_TBL : t_delay_tbl := f_delay_tbl;
+  constant C_FIFO_RAM_STYLE : string := f_ram_style(C_DELAY_CNT);
 
+  signal config_sel : std_logic_vector(clogb2(G_CONFIGS'length) - 1 downto 0);
   signal cfg_idx      : natural range 0 to C_NUM_CFGS - 1;
   -- initialized so time-zero delta cycles never see radix = 0 (natural'left)
   signal config       : t_config := G_CONFIGS(G_CONFIGS'low);
@@ -143,6 +147,16 @@ architecture rtl of mr_fft_stage is
   -- quasi-static "delay - 1" (block-boundary compare value), registered so
   -- the decrementer sits outside every per-beat comparison
   signal delay_last_r : unsigned(clogb2(C_DELAY_CNT) - 1 downto 0);
+  -- quasi-static "radix - 1" (last-phase compare value), registered so the
+  -- decrementer sits outside the in_last / drain compares
+  signal radix_m1     : unsigned(clogb2(C_MAX_RADIX) - 1 downto 0);
+
+  -- settle guard: hold o_ready low for C_CFG_SETTLE cycles after
+  -- i_config_sel changes, while the registered decode settles
+  constant C_CFG_SETTLE : natural := 3;
+  signal cfg_settled : std_logic_vector(C_CFG_SETTLE - 1 downto 0);
+  signal cfg_ok      : std_logic;
+  signal o_ready_pre : std_logic;   -- per-flow ready, before the settle gate
 
   -- delay FIFOs: input samples only (capability 0: X1 write-back as well)
   type t_fifo_data_array is array (0 to C_NUM_FIFOS - 1) of t_cmplx;
@@ -244,7 +258,9 @@ architecture rtl of mr_fft_stage is
   signal out_cnt_radix : std_logic_vector(clogb2(C_MAX_RADIX) - 1 downto 0);
 begin
 
-  in_last <= '1' when to_integer(unsigned(phase)) = config.radix - 1 else '0';
+  in_last <= '1' when unsigned(phase) = radix_m1 else '0';
+
+  o_ready_int <= o_ready_pre and cfg_ok;
 
   o_ready <= o_ready_int;
   o_valid <= o_valid_int;
@@ -285,8 +301,7 @@ begin
 
   GEN_ROT_MULT: if C_NEED_ROT generate
   begin
-    -- word/valid delayed to meet the twiddle at the rotator (fold register +
-    -- ROM read + optional BRAM output register = C_TW_LAT cycles)
+    -- word/valid delayed C_TW_LAT cycles to meet the twiddle at the rotator
     PROC_ROT_REG: process(i_clk)
     begin
       if rising_edge(i_clk) then
@@ -372,15 +387,15 @@ begin
       if bypass = '1' then
         -- bypass: accept whenever the skid has credit (registered state, so
         -- still no combinational i_ready -> o_ready path)
-        o_ready_int <= out_credit_ok;
+        o_ready_pre <= out_credit_ok;
       elsif in_last = '1' then
-        o_ready_int <= res_credit_ok;
+        o_ready_pre <= res_credit_ok;
       elsif v_idx < C_NUM_FIFOS then
-        o_ready_int <= not fifos_full(v_idx);
+        o_ready_pre <= not fifos_full(v_idx);
       else
         -- reconfig transient only: new (smaller) radix applied while the old
         -- phase value is still in the counter
-        o_ready_int <= '0';
+        o_ready_pre <= '0';
       end if;
     end process PROC_O_READY;
 
@@ -436,7 +451,7 @@ begin
         else
           v_inc := joint_beat = '1';
           v_dec := drain_beat = '1' and
-                   to_integer(unsigned(out_phase)) = config.radix - 1;
+                   unsigned(out_phase) = radix_m1;
           if v_inc and not v_dec then
             res_outstanding <= res_outstanding + 1;
           elsif v_dec and not v_inc then
@@ -506,8 +521,8 @@ begin
   begin
 
     -- output-side counters walk the single stored block (X1)
-    out_cnt_radix <= std_logic_vector(to_unsigned(config.radix - 1, clogb2(C_MAX_RADIX)));
-    o_ready_int <= out_credit_ok when bypass = '1'
+    out_cnt_radix <= std_logic_vector(radix_m1);
+    o_ready_pre <= out_credit_ok when bypass = '1'
                    else (out_credit_ok and not pending) when in_last = '1'
                    else not fifos_full(0);
     drain_beat  <= pending and out_credit_ok;
@@ -700,12 +715,30 @@ begin
       o_X4 => preadder_outputs(4)
     );
 
+  -- registered config decode: one register layer per derivation, so
+  -- per-beat paths start at flops instead of decode cones
+  PROC_CONFIG_REG: process(i_clk)
+  begin
+    if rising_edge(i_clk) then
+      if i_reset = '1' then
+        config_sel <= (others => '0');
+        config     <= G_CONFIGS(G_CONFIGS'low);
+        bypass     <= '0';
+        config_delay <= (others => '0');
+        radix_m1   <= to_unsigned(G_CONFIGS(G_CONFIGS'low).radix - 1, radix_m1'length);
+      else
+        config_sel <= i_config_sel;
+        config     <= G_CONFIGS(G_CONFIGS'low + cfg_idx);
+        bypass     <= '1' when config.radix < 2 else '0';
+        config_delay <= C_DELAY_TBL(cfg_idx);
+        radix_m1   <= to_unsigned(config.radix - 1, radix_m1'length);
+      end if;
+    end if;
+  end process PROC_CONFIG_REG;
+
   -- config lookup (quasi-static; clamp defends against a sel code beyond
   -- G_CONFIGS'length during bring-up)
-  cfg_idx      <= minimum(to_integer(unsigned(i_config_sel)), C_NUM_CFGS - 1);
-  config       <= G_CONFIGS(G_CONFIGS'low + cfg_idx);
-  bypass       <= '1' when config.radix < 2 else '0';
-  config_delay <= C_DELAY_TBL(cfg_idx);
+  cfg_idx      <= minimum(to_integer(unsigned(config_sel)), C_NUM_CFGS - 1);
 
   PROC_DELAY_LAST: process(i_clk)
   begin
@@ -713,6 +746,22 @@ begin
       delay_last_r <= unsigned(config_delay) - 1;
     end if;
   end process PROC_DELAY_LAST;
+
+  -- count stable cycles after a sel change (all-ones while steady)
+  PROC_CFG_SETTLE: process(i_clk)
+  begin
+    if rising_edge(i_clk) then
+      if i_reset = '1' or i_config_sel /= config_sel then
+        cfg_settled <= (others => '0');
+      else
+        cfg_settled <= cfg_settled(C_CFG_SETTLE - 2 downto 0) & '1';
+      end if;
+    end if;
+  end process PROC_CFG_SETTLE;
+
+  -- the compare must gate the SAME cycle: a registered-only guard is one
+  -- cycle late and would accept a sample offered together with the switch
+  cfg_ok <= cfg_settled(C_CFG_SETTLE - 1) when i_config_sel = config_sel else '0';
 
   -- input-side counters: advance on accepted input samples
   IN_PHASE_DELAY_GEN_INST: entity work.mr_fft_phase_delay_gen
@@ -771,7 +820,7 @@ begin
       port map (
         i_clk => i_clk,
 
-        i_config_sel => i_config_sel,
+        i_config_sel => config_sel,
         i_k          => rot_exp_slv,
 
         o_twiddle    => twiddle

@@ -32,12 +32,19 @@ architecture rtl of mr_fft_phase_delay_gen is
 	signal phase_cnt : unsigned(clogb2(G_MAX_RADIX) - 1 downto 0) := (others => '0');
 	signal delay_cnt : unsigned(clogb2(G_DELAY_CNT) - 1 downto 0) := (others => '0');
 
-	signal config_radix : unsigned(clogb2(G_MAX_RADIX) - 1 downto 0);
-	signal config_delay : unsigned(clogb2(G_DELAY_CNT) - 1 downto 0);
+	-- registered "-1" compare values, so the per-beat wrap compares start
+	-- from flops instead of a decrementer carry chain
+	signal radix_m1 : unsigned(clogb2(G_MAX_RADIX) - 1 downto 0);
+	signal delay_m1 : unsigned(clogb2(G_DELAY_CNT) - 1 downto 0);
 begin
 
-	config_radix <= unsigned(i_config_radix);
-	config_delay <= unsigned(i_config_delay);
+	PROC_CFG_M1: process(i_clk)
+	begin
+		if rising_edge(i_clk) then
+			radix_m1 <= unsigned(i_config_radix) - 1;
+			delay_m1 <= unsigned(i_config_delay) - 1;
+		end if;
+	end process PROC_CFG_M1;
 
 	PROC_PHASE_CNT: process(i_clk)
 	begin
@@ -45,9 +52,9 @@ begin
 			if (i_reset = '1') then
 				phase_cnt <= (others => '0');
 			else
-				if (i_en = '1' and (delay_cnt = config_delay-1)) then
+				if (i_en = '1' and (delay_cnt = delay_m1)) then
 					phase_cnt <= phase_cnt + 1;
-					if (phase_cnt = config_radix-1) then
+					if (phase_cnt = radix_m1) then
 						phase_cnt <= (others => '0');
 					end if;
 				end if;
@@ -63,7 +70,7 @@ begin
 			else
 				if (i_en = '1') then
 					delay_cnt <= delay_cnt + 1;
-					if (delay_cnt = config_delay-1) then
+					if (delay_cnt = delay_m1) then
 						delay_cnt <= (others => '0');
 					end if;
 				end if;

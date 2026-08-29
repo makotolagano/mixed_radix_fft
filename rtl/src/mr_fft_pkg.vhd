@@ -258,7 +258,7 @@ package body mr_fft_pkg is
 	function rotator_latency(pipelined : boolean) return natural is
 	begin
 		if pipelined then
-			return 4;  -- operand regs, M regs, post-adder/P regs, rounding reg
+			return 5;  -- operand regs x2, M regs, post-adder/P regs, rounding reg
 		else
 			return 0;
 		end if;

@@ -6,7 +6,7 @@ FILELIST_VHDL_TB := $(SCRIPT_DIR)filelist_vhdl_tb.f
 
 # Tool options
 XVHDL_OPTS = --incr --relax --2008
-XELAB_OPTS = --incr --debug typical --relax --mt 8 -L xil_defaultlib -L unisims_ver -L unimacro_ver -L secureip -L xpm
+XELAB_OPTS = --incr --debug off --relax --mt 8 -L xil_defaultlib -L unisims_ver -L unimacro_ver -L secureip -L xpm
 
 # Detect the recipe shell type so Windows + Git Bash/MSYS uses POSIX recipes.
 SHELL_NAME := $(basename $(notdir $(SHELL)))

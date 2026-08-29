@@ -21,14 +21,17 @@ use work.twiddle_pkg.all;   -- t_config_arr, t_coef_rom, f_oct_*
 --   recon  : if conj negate Im ; then apply j^m (swap/negate) -- muxes, no multiplier
 --   k = 0 (arm 0) -> address base -> W = 1.
 --
--- Pipeline (single register so block RAM infers at 1-cycle latency):
---   stage 0 (comb)          : fold k -> ROM address + carry conj/unit flags
---   stage 1 (read)          : ROM read -- the ONLY register
---                             REGISTERED=true  -> clocked read  -> block RAM, 1-cycle latency
---                             REGISTERED=false -> comb read      -> distributed ROM, 0 latency
---   stage 2 (comb)          : reconstruct from the ROM word; drives the output directly
--- Read latency is at most one clock; the conj/unit flags travel with the ROM
--- word so reconstruct stays aligned in both modes.
+-- Pipeline (REGISTERED=true; REGISTERED=false leaves every stage comb),
+-- one fold per stage so each cycle holds one compare + subtract:
+--   stage 0a (comb)  : conjugate fold
+--   stage 0b (reg+comb): fold register, then quarter fold
+--   stage 0c (reg+comb): fold register, then octant fold + base add
+--   stage 0d (reg)   : address register (isolates BRAM address setup)
+--   stage 1  (reg)   : ROM read -- clocked -> block RAM
+--   stage 1b (reg)   : optional BRAM output register (G_OUTPUT_REG)
+--   stage 2  (reg)   : reconstruct (negate/swap muxes), registered output
+-- REGISTERED latency: 5 cycles (+1 with G_OUTPUT_REG); the conj/unit flags
+-- travel with the ROM word so reconstruct stays aligned in both modes.
 -- ---------------------------------------------------------------------------
 entity twiddle_rom is
     generic (
@@ -63,12 +66,14 @@ architecture rtl of twiddle_rom is
     constant C_ROM_INIT : t_slv_rom := f_oct_rom(CONFIGS);
     signal   rom_mem    : t_slv_rom(C_ROM_INIT'range) := C_ROM_INIT;
 
-    attribute rom_style : string;
+attribute rom_style : string;
     attribute rom_style of rom_mem : signal is G_ROM_STYLE;
     constant C_BASE : t_natarr  := f_oct_base(CONFIGS);
     constant C_NN   : t_natarr  := f_oct_N(CONFIGS);
     constant C_LVL  : t_natarr  := f_oct_level(CONFIGS);
     constant C_WW   : natural    := i_k'length + 3;          -- fold working width (headroom 8*r)
+    constant C_AW   : natural    := maximum(1, f_clog2b(C_ROM_INIT'length));  -- addr bits
+    constant C_PW   : natural    := maximum(C_WW, C_AW) + 1; -- addr arithmetic width
     constant C_HI   : integer    := c_twiddle_int_width - 1;
     constant C_LO   : integer    := -c_twiddle_frac_width;
     constant C_CW   : natural    := c_twiddle_int_width + c_twiddle_frac_width;  -- bits per component
@@ -79,20 +84,29 @@ architecture rtl of twiddle_rom is
     signal base_p          : natural range 0 to C_ROM_INIT'length-1;
     signal lvl_p           : natural range 1 to 3;
     signal n_p, n2_p, n4_p : unsigned(C_WW-1 downto 0);
+    signal n8_p            : unsigned(C_WW-1 downto 0);
+    signal bn4_p           : unsigned(C_PW-1 downto 0);      -- base + N/4 (octant branch)
 
-    -- stage 0a (conjugate + quarter folds) -> stage 0b
+    -- stage 0a (conjugate fold) -> stage 0b (the conjugate fold never
+    -- touches m, so no m here)
     signal r1, r1_s    : unsigned(C_WW-1 downto 0);
     signal conj1, conj1_s : std_logic;
-    signal m1, m1_s    : unsigned(1 downto 0);
 
-    -- stage 0b -> stage 0c : folded ROM address + reconstruct flags
-    signal addr      : natural range 0 to C_ROM_INIT'length-1;
+    -- stage 0b (quarter fold) -> stage 0c
+    signal r2, r2_s    : unsigned(C_WW-1 downto 0);
+    signal conj2, conj2_s : std_logic;
+    signal m2, m2_s    : unsigned(1 downto 0);
+
+    -- stage 0c -> stage 0d : folded ROM address + reconstruct flags. The
+    -- address wraps (unsigned truncation) during a config-switch transient;
+    -- the guarded read below keeps the discarded transient legal in sim.
+    signal addr      : unsigned(C_AW-1 downto 0);
     signal conjugate : std_logic;
     signal m         : unsigned(1 downto 0); -- unit j^m
 
-    -- stage 0c (address register) -> stage 1: the read cycle then holds no
-    -- logic, only the register -> BRAM routing + address setup
-    signal addr_r : natural range 0 to C_ROM_INIT'length-1;
+    -- stage 0d (address register) -> stage 1: the read cycle then holds only
+    -- the register -> BRAM routing plus the read guard
+    signal addr_r : unsigned(C_AW-1 downto 0);
     signal conj_b : std_logic;
     signal m_b    : unsigned(1 downto 0);
 
@@ -124,6 +138,8 @@ begin
                 n_p    <= v_N;
                 n2_p   <= shift_right(v_N, 1);                       -- N/2
                 n4_p   <= shift_right(v_N, 2);                       -- N/4
+                n8_p   <= shift_right(v_N, 3);                       -- N/8
+                bn4_p  <= to_unsigned(C_BASE(v_sel) + C_NN(v_sel) / 4, C_PW);
             end if;
         end process;
     end generate;
@@ -140,71 +156,90 @@ begin
             n_p    <= v_N;
             n2_p   <= shift_right(v_N, 1);
             n4_p   <= shift_right(v_N, 2);
+            n8_p   <= shift_right(v_N, 3);
+            bn4_p  <= to_unsigned(C_BASE(v_sel) + C_NN(v_sel) / 4, C_PW);
         end process;
     end generate;
 
-    -- ---- stage 0a (comb): conjugate + quarter folds ----
-    fold_a : process (i_k, n_p, n2_p, lvl_p)
-        variable v_r         : unsigned(C_WW-1 downto 0);
-        variable v_m         : unsigned(1 downto 0);       -- unit j^m; +k wraps mod 4
-        variable v_conjugate : std_logic;
+    -- ---- stage 0a (comb): conjugate fold (2k > N <=> k > N/2 exactly) ----
+    fold_a : process (i_k, n_p, n2_p)
+        variable v_r : unsigned(C_WW-1 downto 0);
     begin
-        v_r  := resize(unsigned(i_k), C_WW);                         -- k < N by construction
-        v_m  := "00";
-        v_conjugate := '0';
-
-        if shift_left(v_r, 1) > n_p then               -- conjugate fold
-            v_r := n_p - v_r;   v_conjugate := not v_conjugate;
+        v_r := resize(unsigned(i_k), C_WW);                          -- k < N by construction
+        if v_r > n2_p then
+            r1    <= n_p - v_r;
+            conj1 <= '1';
+        else
+            r1    <= v_r;
+            conj1 <= '0';
         end if;
-        if lvl_p >= 2 and shift_left(v_r, 2) > n_p then -- quarter fold (t=-1)
-            v_r := n2_p - v_r;  v_m := v_m + 2;  v_conjugate := not v_conjugate;
-        end if;
-
-        r1    <= v_r;
-        conj1 <= v_conjugate;
-        m1    <= v_m;
     end process;
 
-    -- fold pipeline register (REGISTERED mode): splits the exponent->address
-    -- cone so the BRAM address setup path is short
-    fold_reg_g : if REGISTERED generate
+    fold_a_reg_g : if REGISTERED generate
         process (i_clk) begin
             if rising_edge(i_clk) then
                 r1_s    <= r1;
                 conj1_s <= conj1;
-                m1_s    <= m1;
             end if;
         end process;
     end generate;
 
-    fold_comb_g : if not REGISTERED generate
+    fold_a_comb_g : if not REGISTERED generate
         r1_s    <= r1;
         conj1_s <= conj1;
-        m1_s    <= m1;
     end generate;
 
-    -- ---- stage 0b (comb): octant fold + base add -> ROM address ----
-    fold_b : process (r1_s, conj1_s, m1_s, n_p, n4_p, lvl_p, base_p)
-        variable v_r         : unsigned(C_WW-1 downto 0);
-        variable v_m         : unsigned(1 downto 0);
-        variable v_conjugate : std_logic;
+    -- ---- stage 0b (comb): quarter fold, t=-1 (4r > N <=> r > N/4) ----
+    fold_b : process (r1_s, conj1_s, n2_p, n4_p, lvl_p)
     begin
-        v_r         := r1_s;
-        v_m         := m1_s;
-        v_conjugate := conj1_s;
-
-        if lvl_p >= 3 and shift_left(v_r, 3) > n_p then -- octant fold (t=-j; +j if conjugate)
-            v_r := n4_p - v_r;
-            if v_conjugate = '1' then v_m := v_m + 1; else v_m := v_m + 3; end if;
-            v_conjugate := not v_conjugate;
+        if lvl_p >= 2 and r1_s > n4_p then
+            r2    <= n2_p - r1_s;
+            conj2 <= not conj1_s;
+            m2    <= "10";
+        else
+            r2    <= r1_s;
+            conj2 <= conj1_s;
+            m2    <= "00";
         end if;
-
-        addr      <= base_p + to_integer(v_r);
-        conjugate <= v_conjugate;
-        m         <= v_m;
     end process;
 
-    -- ---- stage 0c: address register (REGISTERED mode) -- isolates the BRAM
+    fold_b_reg_g : if REGISTERED generate
+        process (i_clk) begin
+            if rising_edge(i_clk) then
+                r2_s    <= r2;
+                conj2_s <= conj2;
+                m2_s    <= m2;
+            end if;
+        end process;
+    end generate;
+
+    fold_b_comb_g : if not REGISTERED generate
+        r2_s    <= r2;
+        conj2_s <= conj2;
+        m2_s    <= m2;
+    end generate;
+
+    -- ---- stage 0c (comb): octant fold + base add -> ROM address ----
+    -- folded address is (base + N/4) - r with bn4_p precomputed, so both
+    -- branches are ONE adder deep and run in parallel; the compare
+    -- (8r > N <=> r > N/8) only drives the selects
+    fold_c : process (r2_s, conj2_s, m2_s, n8_p, lvl_p, base_p, bn4_p)
+        variable v_fold : boolean;
+    begin
+        v_fold := lvl_p >= 3 and r2_s > n8_p;            -- octant fold (t=-j; +j if conjugate)
+
+        if v_fold then
+            addr      <= resize(bn4_p - r2_s, C_AW);
+            conjugate <= not conj2_s;
+            if conj2_s = '1' then m <= m2_s + 1; else m <= m2_s + 3; end if;
+        else
+            addr      <= resize(to_unsigned(base_p, C_PW) + r2_s, C_AW);
+            conjugate <= conj2_s;
+            m         <= m2_s;
+        end if;
+    end process;
+
+    -- ---- stage 0d: address register (REGISTERED mode) -- isolates the BRAM
     --      address setup (or LUT-ROM decode) from the fold logic ----
     addr_reg_g : if REGISTERED generate
         process (i_clk) begin
@@ -227,7 +262,11 @@ begin
     read_reg_g : if REGISTERED generate
         process (i_clk) begin
             if rising_edge(i_clk) then
-                rom_q <= rom_mem(addr_r);
+                -- read guard: a wrapped transient address (config switch)
+                -- reads nothing -- keeps the array index legal in simulation
+                if to_integer(addr_r) <= C_ROM_INIT'length - 1 then
+                    rom_q <= rom_mem(to_integer(addr_r));
+                end if;
                 conjugate_q  <= conj_b;
                 m_q   <= m_b;
             end if;
@@ -235,7 +274,7 @@ begin
     end generate;
 
     read_comb_g : if not REGISTERED generate
-        rom_q <= rom_mem(addr_r);
+        rom_q <= rom_mem(minimum(to_integer(addr_r), C_ROM_INIT'length - 1));
         conjugate_q  <= conj_b;
         m_q   <= m_b;
     end generate;
@@ -257,26 +296,45 @@ begin
         m_q2         <= m_q;
     end generate;
 
-    -- ---- stage 2 (comb): unpack the ROM word and reconstruct; drives the output directly ----
+    -- ---- stage 2: unpack the ROM word and reconstruct ----
+    -- negations in parallel off the raw word, then a 4:1 mux per component:
+    -- one carry-chain level (chaining conjugate then j^m would need two)
     recon : process (rom_q2, conjugate_q2, m_q2)
         variable a, b, na, nb : sfixed(C_HI downto C_LO);
     begin
-        a := to_sfixed(rom_q2(2*C_CW-1 downto C_CW), C_HI, C_LO); -- re
-        b := to_sfixed(rom_q2(C_CW-1   downto  0), C_HI, C_LO);   -- im
-        if conjugate_q2 = '1' then -- conjugate: negate Im
-            b := resize(-b, C_HI, C_LO, fixed_saturate, fixed_truncate);
-        end if;
+        a  := to_sfixed(rom_q2(2*C_CW-1 downto C_CW), C_HI, C_LO); -- re
+        b  := to_sfixed(rom_q2(C_CW-1   downto  0), C_HI, C_LO);   -- im
         na := resize(-a, C_HI, C_LO, fixed_saturate, fixed_truncate);
         nb := resize(-b, C_HI, C_LO, fixed_saturate, fixed_truncate);
 
-        case m_q2 is                                             -- apply unit j^m: swapping/negation
-            when "00"   => twiddle_c.re <= a;  twiddle_c.im <= b;   --  1 : ( a,  b)
-            when "01"   => twiddle_c.re <= nb; twiddle_c.im <= a;   --  j : (-b,  a)
-            when "10"   => twiddle_c.re <= na; twiddle_c.im <= nb;  -- -1 : (-a, -b)
-            when others => twiddle_c.re <= b;  twiddle_c.im <= na;  -- -j : ( b, -a)
+        -- twiddle = j^m * (a, conj ? -b : b), expanded per component
+        case m_q2 is
+            when "00" =>                                        --  1 : ( x,  y)
+                twiddle_c.re <= a;
+                twiddle_c.im <= nb when conjugate_q2 = '1' else b;
+            when "01" =>                                        --  j : (-y,  x)
+                twiddle_c.re <= b  when conjugate_q2 = '1' else nb;
+                twiddle_c.im <= a;
+            when "10" =>                                        -- -1 : (-x, -y)
+                twiddle_c.re <= na;
+                twiddle_c.im <= b  when conjugate_q2 = '1' else nb;
+            when others =>                                      -- -j : ( y, -x)
+                twiddle_c.re <= nb when conjugate_q2 = '1' else b;
+                twiddle_c.im <= na;
         end case;
     end process;
 
-    o_twiddle <= twiddle_c;
+    -- reconstruct output register (REGISTERED mode)
+    recon_reg_g : if REGISTERED generate
+        process (i_clk) begin
+            if rising_edge(i_clk) then
+                o_twiddle <= twiddle_c;
+            end if;
+        end process;
+    end generate;
+
+    recon_comb_g : if not REGISTERED generate
+        o_twiddle <= twiddle_c;
+    end generate;
 
 end architecture;

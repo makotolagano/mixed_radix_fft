@@ -1,2 +1,2 @@
-add_wave -recursive /
+# add_wave -recursive /
 run all
