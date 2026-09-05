@@ -593,6 +593,7 @@ Swapping and conjugating methods are represented in Figures \ref{fig:inverse_fft
 The conjugate method requires more hardware resources then the swapping method because the negation of the imaginary part may need a full adder to be implemented if it's represented in fixed-point format (effectively two's complement). Swapping method requires only a simple bit swap.
 
 \section{Fixed-point number representation}
+\label{sec:fixed_point}
 
 Hardware implementations of numerical algorithms often have a requirement to be resource-efficient and as fast as possible while maintaining good enough mathematical performance (such as SNR or Signal-to-Noise Ratio). Floating-point arithmetic is not always the best choice due to its high compute latency and big resource footprint.
 To achieve this, so called fixed-point arithmetic is often used. It is a form of integer arithmetic that is used to represent real numbers in a fixed-precision format.
@@ -672,7 +673,7 @@ To illustrate the stream flow of data and the need for FIFOs, let's consider the
 
 One could see that to perform the computation on correct samples, a sample $x[n]$ needs to be aligned with the sample $x[n+N/2]$. This is achieved by the FIFO that stores the incoming first half of the samples and reads them when the second half of the samples starts arriving. This way all samples $N/2$ samples apart are put together into the Preadder for the butterfly computation.
 
-The radix-2 butterfly (Figure \ref{fig:radix2_fft_1_diag}) performs an addition and a subtraction of the input samples. With this architecture, the additions result of the Preadder can be passed to the Rotator right away and the subtraction result (generated in the same cycle as the addition result) can be feed back to the FIFO and passed to the Rotator when all addition results are finished generating. This is possible because the FIFO, full after the last sample of the first half of the samples are buffered, is being read out when each new sample of the second half of the samples arrives. These FIFO reads make space each cycle for a new sample to be buffered, and since we don't need input-sample buffering yet (we buffer only the first half of the samples), we can use the same FIFO for both input and output.
+The radix-2 butterfly (Figure \ref{fig:radix2_fft_1_diag}) performs an addition and a subtraction of the input samples. With this architecture, the additions result of the Preadder can be passed to the Rotator right away and the subtraction result (generated in the same cycle as the addition result) can be feed back to the FIFO and passed to the Rotator when all addition results are finished generating. This is possible because the FIFO, full after the last sample ofid the first half of the samples are buffered, is being read out when each new sample of the second half of the samples arrives. These FIFO reads make space each cycle for a new sample to be buffered, and since we don't need input-sample buffering yet (we buffer only the first half of the samples), we can use the same FIFO for both input and output.
 
 Radix-3 example of this dataflow is shown in Figure \ref{fig:sdf_buffer_flow_r3}. Instead of buffering just the first half of the samples, it buffers the first two thirds of the samples in two separate buffers where each one buffers one of the thirds and reads them when the last third of the samples starts arriving. This way all samples $N/3$ samples apart are put together into the Preadder for the butterfly computation. The same would be true for a radix-5 stage.
 
@@ -731,9 +732,9 @@ $N$ & $i$ & $j$ & $k$ & stages & $N$ & $i$ & $j$ & $k$ & stages\\
 \end{table}
 
 The number of radix-2, radix-3 and radix-5 stages to cover all FFT sizes is 10, 6 and 3 respectively. This means that the SDF architecture needs to be able to support 10 radix-2 stages, 6 radix-3 stages and 3 radix-5 stages but not all of them active at the same time.
-Implementing all of them at the same time would require a lot of hardware resources which is feasible, but not optimal. Therefore, the SDF architecture is implemented in a reconfigurable manner because not all of the stages are needed at the same time. In fact, maximum number of stages that are needed at the same time is 11 for the case of the $N=3072$. So, if a stage can be reconfigured to be a radix-2 stage, a radix-3 stage or a radix-5 stage, or any combination of them, the hardware implementation can be optimized to use only the necessary number of stages.
+Implementing all of them at the same time would require a lot of hardware resources which is feasible, but not optimal. Therefore, the SDF architecture is implemented in a reconfigurable manner because not all of the stages are needed at the same time. In fact, maximum number of stages that are active in one configuration is 11 for the case of the $N=3072$. So, if a stage can be reconfigured to be a radix-2 stage, a radix-3 stage or a radix-5 stage, or some needed combination of them, the hardware implementation can be optimized to use only the necessary number of stages.
 
-This recofigurable architecture leads to a high level block diagram of the SDF architecture as shown in Figure \ref{fig:sdf_reconfigurable_high_level} where each stage is a reconfigurable block that can be configured to be a radix-2 stage, a radix-2/3 stage or a radix-2/3/5 stage. If a stage is not needed, it can be bypassed by reconfiguring it to be in bypass mode.
+This recofigurable architecture leads to a high level block diagram of the SDF architecture as shown in Figure \ref{fig:sdf_reconfigurable_high_level} where each stage is a reconfigurable block that can be configured as a radix-2 stage, a radix-2/3 stage or a radix-2/3/5 stage. If a stage is not needed, it can be bypassed by reconfiguring it to be in bypass mode.
 
 \begin{figure}[H]
     \centering
@@ -742,7 +743,7 @@ This recofigurable architecture leads to a high level block diagram of the SDF a
     \label{fig:sdf_reconfigurable_high_level}
 \end{figure}
 
-So, three levels of capabilities are needed:
+So, three levels of stage capabilities are needed:
 \begin{itemize}
     \item Radix-2 stage,
     \item Radix-2/3 stage,
@@ -751,9 +752,10 @@ So, three levels of capabilities are needed:
 
 \subsection{Radix-2 Stage}
 
-The proposed radix-2 stage is shown in Figure \ref{fig:sdf_reconfigurable_radix_2_stage}. Besides the FIFO and Preadder and Rotator, which we already discussed, it contains a control logic that is responsible for the reconfiguration of the stage, a twiddle factor unit and another FIFO at the output.
-The role of reconfiguration in this stage is to bypass the stage.
-Twiddle factor unit is responsible for the generation of the twiddle factors for the stage when a certain FFT size is selected. It will be discussed in more detail in the next section.
+The proposed radix-2 stage is shown in Figure \ref{fig:sdf_reconfigurable_radix_2_stage}. Besides the FIFO, Preadder and Rotator, which we already discussed, it contains control logic that is responsible for the reconfiguration of the stage, a Twiddle Factor Unit and another FIFO at the output.
+The role of the reconfiguration in this stage is to bypass the stage.
+The Twiddle Factor Unit is responsible for the generation of the twiddle factors for the stage when a certain FFT size is selected. It will be discussed in more detail in the next section.
+All stages in the chain use ready/valid protocol for communication between them. Rotator has a free running pipeline inside it and a valid bit shift register to mark which sample is the valid one. So, the output Skid FIFO has a role of a skid buffer that can buffer valid samples of the Rotator when the next stage is not ready to receive the data, and stop the issue of new samples to Rotator. Another role of the Skid FIFO is to buffer the samples when the stage is bypassed and no samples are needed to be processed. This cuts combinational path for ready and valid signals between stages if the stage is bypassed.
 
 \begin{figure}[H]
     \centering
@@ -762,11 +764,18 @@ Twiddle factor unit is responsible for the generation of the twiddle factors for
     \label{fig:sdf_reconfigurable_radix_2_stage}
 \end{figure}
 
-Preadder of a radix-2 stage is shown in Figure \ref{fig:sdf_reconfigurable_radix_2_stage_preadder}.
+Preadder of a radix-2 stage is shown in Figure \ref{fig:radix_2_preadder}. It is a simple butterfly computation block that performs the addition and subtraction of the input samples and essentially has two signed adders. Each output passes through a $\gg 1$ rnd block, which halves the result and rounds it back to the memory word; this is the scaling step of the stage and is described in Section \ref{sec:scaling}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.5\textwidth]{figs/reconf2_bu_zola.pdf}
+    \caption{Preadder of the radix-2 stage.}
+    \label{fig:radix_2_preadder}
+\end{figure}
 
 \subsection{Radix-2/3 Stage}
 
-The proposed radix-2/3 stage is shown in Figure \ref{fig:sdf_reconfigurable_radix_2_3_stage}. 
+The proposed radix-2/3 stage is shown in Figure \ref{fig:sdf_reconfigurable_radix_2_3_stage}. Besides the components also present in the radix-2 stage, it contains additional Result FIFOs at the Preadder outputs.
 
 \begin{figure}[H]
     \centering
@@ -775,14 +784,39 @@ The proposed radix-2/3 stage is shown in Figure \ref{fig:sdf_reconfigurable_radi
     \label{fig:sdf_reconfigurable_radix_2_3_stage}
 \end{figure}
 
+Radix-2/3 Preadder is shown in Figure \ref{fig:radix_2_3_preadder}. It is a more complex butterfly computation block that besides multiple additions and subtractions, it also performs two multiplications by fixed coefficients. One of the coefficients is either $1$ or $0.5$, depending on the stage radix configuration. Since both values are powers of two, this "multiplication" does not require a multiplier at all -- it is implemented as a multiplexed arithmetic shift. The other coefficient is
+
+\begin{equation}
+    k_6 = -\sin\frac{2\pi}{3} = \frac{j}{2}\left(W_3^{-1} - W_3^{1}\right) = -\frac{\sqrt{3}}{2} \approx -0.8660,
+\label{eq:coeff_k6}
+\end{equation}
+
+which is simply the imaginary part of the radix-3 twiddle factor $W_3 = -\frac{1}{2} - j\frac{\sqrt{3}}{2}$. Note that $k_6$ is a purely real number. A general complex multiplication $(a + jb)(c + jd)$ costs four real multiplications and two additions, but multiplying a complex sample by a purely real coefficient $k$ reduces to $k a + j k b$, which is only two real multiplications and no additions. The remaining factor $j$ that completes the radix-3 butterfly is pulled out of the coefficient and applied separately in the $j$ block of Figure \ref{fig:radix_2_3_preadder}: multiplication by $j$ is just a swap of the real and imaginary parts with one negation, so it costs a bit vector inversion and an adder in hardware (negation in two's complement is a bit inversion and addition of 1).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figs/reconf23_bu_zola.pdf}
+    \caption{Radix-2/3 Preadder.}
+    \label{fig:radix_2_3_preadder}
+\end{figure}
+
+Dashed vertical lines indicate the pipeline stages inserted to cut long combinational paths through the preadder. This adds three clock cycles of latency to the stage. but it is a necessary to achieve the desired maximum clock frequency. The introduced latency creates a data hazard that's resolved by addition of the Result FIFOs. If the direct write-back to the input FIFOs is considered with a Preadder that has latency of one or more clock cycles, for example 2 clock cycles, the following hazard scenario would occur:
+\begin{itemize}
+    \item Currently, the third third of samples is being processed by the Preadder.
+    \item Last three samples for calculation are passed to Preadder inputs.
+    \item Because of the latency of Preadder, the three samples are not available at the Preadder outputs in the same clock cycle so they cannot be written back to the input FIFOs.
+    \item In the next clock cycle, the first sample of the new stream of samples is coming to the first input FIFO and the FIFO is being written with new samples even though all samples from the previous stream are not yet written back to it.
+    \item After two clock cycles, the three samples are available at the Preadder outputs and can be written back to the input FIFOs.
+    \item The new stream of samples is overlapped with the previous stream and the samples are lost.
+\end{itemize}
+This would cause a data hazard because some samples are lost. This is resolved by either gating the new stream of samples, which creates bubbles, or by the addition of new set of FIFOs (with the depth equal to the depth of the input FIFOs + the pipeline depth of the Preadder to accomodate the latency like Skid FIFO does for the Rotator output) at the Preadder outputs to accept the Preadder results. Result FIFOs are then read and samples are passed to Rotator pipeline for twiddle factor multiplication. At the cost of doubling the memory requirements of a stage, the second option is chosen.
+
+Table below the Preadder diagram shows the multiplexer select values for each of radix configurations, together with the scaling shift $s$ applied in the $\gg s$ rnd blocks at the outputs: one bit in the radix-2 mode and two bits in the radix-3 mode (Section \ref{sec:scaling}).
 
 
 \subsection{Radix-2/3/5 Stage}
 
 The proposed radix-2/3/5 stage is shown in Figure \ref{fig:sdf_reconfigurable_radix_2_3_5_stage}.
-Besides the FIFO and Preadder and Rotator, which we already discussed, it contains a control logic that is responsible for the reconfiguration of the stage, a twiddle factor unit and another FIFO at the output.
-The role of reconfiguration in this stage is to bypass the stage.
-Twiddle factor unit is responsible for the generation of the twiddle factors for the stage when a certain FFT size is selected. It will be discussed in more detail in the next section.
 
 \begin{figure}[H]
     \centering
@@ -791,12 +825,169 @@ Twiddle factor unit is responsible for the generation of the twiddle factors for
     \label{fig:sdf_reconfigurable_radix_2_3_5_stage}
 \end{figure}
 
+Radix-2/3/5 Preadder is shown in Figure \ref{fig:radix_2_3_5_preadder}. It extends the radix-2/3 structure with the adder levels and coefficient multipliers required by the radix-5 butterfly. The multiplexed shift coefficient now takes the values $1$, $0.5$ or $0.25$ (again implemented as a shift), the shared multiplier selects between $k_6$ for the radix-3 mode and $k_2$ for the radix-5 mode, and three additional fixed multipliers apply the coefficients $k_3$, $k_4$ and $k_5$. Expressed both trigonometrically and through the twiddle factors $W_5^{k}$, the coefficients are:
+
+\begin{align}
+    k_2 &= \frac{1}{2}\left(\cos\frac{2\pi}{5} - \cos\frac{4\pi}{5}\right)
+         = \frac{1}{4}\left(W_5^{1} + W_5^{-1} - W_5^{2} - W_5^{-2}\right)
+         = \frac{\sqrt{5}}{4} \approx 0.5590, \\
+    k_3 &= j\left(\sin\frac{4\pi}{5} - \sin\frac{2\pi}{5}\right)
+         = \frac{1}{2}\left(W_5^{1} - W_5^{-1} - W_5^{2} + W_5^{-2}\right)
+         \approx -j\,0.3633, \\
+    k_4 &= -j\sin\frac{4\pi}{5}
+         = \frac{1}{2}\left(W_5^{2} - W_5^{-2}\right)
+         \approx -j\,0.5878, \\
+    k_5 &= j\left(\sin\frac{2\pi}{5} + \sin\frac{4\pi}{5}\right)
+         = \frac{1}{2}\left(W_5^{-1} - W_5^{1} + W_5^{-2} - W_5^{2}\right)
+         \approx j\,1.5388.
+\label{eq:coeffs_radix5}
+\end{align}
+
+These coefficients arise from the symmetries of the radix-5 twiddle factors: the real parts of $W_5^{k}$ and $W_5^{-k}$ are equal while their imaginary parts are opposite, which allows the DFT matrix to be factored into sums and differences of the inputs multiplied by the purely real combination $k_2$ and the purely imaginary combinations $k_3$, $k_4$ and $k_5$.
+
+Note that every coefficient is again either purely real ($k_2$, $k_6$) or purely imaginary ($k_3$, $k_4$, $k_5$), so by the argument given for the radix-2/3 preadder each of the four coefficient multipliers costs only two real multiplications instead of four, mapping to eight real multipliers (DSP blocks) instead of sixteen. For $k_3$, $k_4$ and $k_5$ the zero real part is simply pruned by synthesis, while on the shared $k_6/k_2$ multiplier the factor $j$ needed in the radix-3 mode is applied structurally by the multiplexed $j$ block.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figs/reconf235_bu_zola.pdf}
+    \caption{Radix-2/3/5 Preadder.}
+    \label{fig:radix_2_3_5_preadder}
+\end{figure}
+
+Dashed vertical lines indicate the pipeline stages inserted to cut long combinational paths through the preadder. This adds three clock cycles of latency to the stage just like in the radix-2/3 case.
+
+Table below the Preadder diagram shows the multiplexer select values for each of radix configurations and the scaling shift $s$ of the output $\gg s$ rnd blocks: one, two or three bits for the radix-2, radix-3 and radix-5 modes. The shift amount is selected by the same s0 signal that selects the radix mode.
+
 \subsection{Twiddle Factor Unit}
+
+The twiddle factor unit generates one twiddle factor for every output beat of the stage. Its block diagram is shown in Figure \ref{fig:twiddle_factor_unit}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figs/twiddle_factor_unit.pdf}
+    \caption{Twiddle factor unit.}
+    \label{fig:twiddle_factor_unit}
+\end{figure}
+
+The phase and delay counters (discussed in subsection \ref{sec:phase_delay_counters}) track the output arm $p$ (from which "arm" of the Preadder Result FIFOs the sample comes from) and the position $n$ inside the block (index of the sample inside the arm block). From them the twiddle exponent $k = p \cdot n$ is formed by the exponent accumulator: it is cleared at the start of every block and incremented by $p$ on every beat, so no multiplier is needed.
+
+The twiddle factors are read from a ROM. Storing all $N$ points of the unit circle would be wasteful, so only the first octant ($0 \le r \le N/8$) is stored and the symmetry of the unit circle is used for the rest. The octant fold block reduces the exponent $k$ to the stored index $r$ in three steps (half, quarter and octant of the circle); each step sets a flag: a conjugate flag and a two-bit code $m$ of the unit multiplier $j^m$. The tables for all FFT sizes supported by the stage are packed into a single ROM, and the configuration parameters block supplies the base address and size $N$ of the selected configuration. The ROM is read synchronously, so it maps to block RAM.
+
+The flags travel alongside the ROM and are applied in the reconstruct block: the conjugate flag negates the imaginary part and the multiplication by $j^m$ is a swap and negation of the components, so the reconstruction is done only with multiplexers. All blocks of the unit are registered and the stage delays the data samples by the same number of cycles, so each twiddle factor meets its sample at the rotator input.
 
 \subsection{Rotator}
 
+The rotator multiplies every output sample of the stage by the twiddle factor supplied by the twiddle factor unit. Its structure is shown in Figure \ref{fig:rotator_unit}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figs/rotator_unit.pdf}
+    \caption{Rotator.}
+    \label{fig:rotator_unit}
+\end{figure}
+
+Unlike the preadder coefficients, the twiddle factor is a general complex number, so the full complex product is needed. With the sample $x = a + jb$ and the twiddle factor $W = c + jd$, the result is formed as $y = (ac - bd) + j(ad + bc)$, which takes four real multiplications and two additions. The products and their sums are kept in full precision; the result is quantized back to the memory word only once, in the rnd blocks, with half-up rounding.
+
+The rotator is pipelined with five register cuts, marked with dashed lines in Figure \ref{fig:rotator_unit}: two operand registers (A1, A2), the product registers (B), the sum registers (C) and the rounding registers (D). The cuts are placed so that synthesis absorbs A1/A2, B and C into the input, multiplier and output registers of the four DSP blocks. A valid flag is delayed through the same number of registers, so the datapath runs freely without enables.
+
+\subsection{Scaling and Rounding}
+\label{sec:scaling}
+
+All samples stored or streamed in the design -- in the delay, result and skid FIFOs and on the links between the stages -- share one fixed-point memory word. A butterfly, however, grows the signal: a radix-$r$ butterfly sums $r$ inputs, so its outputs can be up to $r$ times larger than the inputs. Without a countermeasure the word would overflow after a few stages. Growing the word by $\log_2 r$ bits in every stage would avoid the overflow, but it would make every FIFO, adder and multiplier downstream wider, and the FIFOs dominate the memory of the design.
+
+Instead, the stages apply a fixed scaling schedule: every stage divides its butterfly outputs by a power of two that covers the growth of its radix, i.e. by $2^{s}$ with $s = \lceil \log_2 r \rceil$ -- one bit for radix-2, two bits for radix-3 and three bits for radix-5. A power of two is chosen deliberately, because dividing by three or five exactly would need a multiplier per output, while a division by $2^{s}$ is an arithmetic right shift, which costs no logic at all. The shift amount is selected by the same radix mode signal s0 that configures the preadder. Since the shift always covers the growth, the stage output fits back into the memory word by construction and no saturation logic is needed. The price is the one already discussed in Section \ref{sec:fixed_point}: the bits shifted out are lost, so a small amount of quantization noise is added in every stage.
+
+To keep this noise as low as possible the arithmetic inside the preadder is done in a wider word and without intermediate rounding: the adder tree, the algorithmic $1/2$ and $1/4$ shifts of the radix-3 and radix-5 butterflies and the sums of the coefficient products are computed exactly, and only the coefficient products themselves are trimmed once on the post-adder of the DSP block. The scaling shift and the return to the memory word are then fused into a single operation at the exit of the preadder, the $\gg s$ rnd blocks in Figures \ref{fig:radix_2_preadder}, \ref{fig:radix_2_3_preadder} and \ref{fig:radix_2_3_5_preadder}: half of an output LSB is added, the word is shifted right by $s$ bits and truncated, which gives half-up rounding for free. In this way each stage rounds its data exactly once in the butterfly. The rotator adds a second rounding per stage, but no scaling: the magnitude of a twiddle factor is at most one, so the product needs no extra headroom and is only rounded back to the memory word, as described above.
+
+Because the shift is $\lceil \log_2 r \rceil$ rather than $\log_2 r$, the radix-3 and radix-5 stages divide by four and eight instead of by three and five. After $n_2$ radix-2, $n_3$ radix-3 and $n_5$ radix-5 stages the chain therefore delivers
+
+\begin{equation}
+    X'_k = X_k \cdot 2^{-S}, \qquad S = n_2 + 2 n_3 + 3 n_5,
+\end{equation}
+
+instead of the $X_k / N$ convention. The residual gain between the two is corrected by the final scaler at the end of the chain (Figure \ref{fig:top_level_control}), which multiplies every output by
+
+\begin{equation}
+    c = \frac{2^{S}}{N} = \left(\frac{4}{3}\right)^{n_3} \left(\frac{8}{5}\right)^{n_5},
+\end{equation}
+
+a real constant between $4/3$ and about $5.7$ for the supported sizes. The constant is computed for every configuration at elaboration time and selected together with the configuration at commit through the SCALE register. Correcting the gain once at the end of the chain is much cheaper than dividing exactly in every stage: since $c$ is real, the scaler needs only one real multiplication per component (one DSP block each), the half-up rounding constant again rides on the post-adder, and the product is rounded once to the memory word. The scaler is a three-stage pipeline with the same credit-gated output skid as the stage, so the output of the core is delivered as $X_k / N$ with a registered handshake.
+
+\subsection{FIFOs}
+
+All buffers of the stage -- the delay FIFOs, the result FIFOs and the output skid -- are instances of one show-ahead FIFO. The read port always presents the oldest word together with a valid flag, and the read enable pops it; the consuming side can therefore inspect the word first and decide cycle by cycle whether to take it, which is exactly what the drain gate and the output handshake need.
+
+The storage is a simple dual-port block RAM with one write port and one read port. Two ports are required because in streaming operation the FIFO is written and read in the same cycle: while the joint phase pops one sample per delay FIFO, the fill phases of the next block are already writing new samples into them. The synchronous read of the block RAM has a latency of two cycles (memory read plus the RAM output register), so two additional fabric registers are placed in front of the read port. They hold the two oldest words, are refilled from the RAM in the background, and make back-to-back pops run at one word per cycle without bubbles; when the RAM is empty, writes bypass directly into these registers, so the FIFO also works as a delay line of depth one.
+
+The reconfigurability of the depth costs nothing in the FIFO itself. Each FIFO is built at elaboration time for the largest configuration of its slot (depth $N_{max}/r$ for the delay FIFOs), and the effective depth at runtime is set purely by occupancy: for a smaller FFT size the control simply writes fewer words ($N/r$ for the selected configuration) before the joint phase starts popping them, so the same RAM acts as a shorter delay line. Only the delay compare value in the counters changes between configurations; the read and write pointers wrap at the physical depth, which does not need to be a power of two.
+
+\subsection{Phase and Delay Counters}
+
+\label{sec:phase_delay_counters}
+All timing inside a stage is derived from one pair of cascaded counters, shown in Figure \ref{fig:phase_delay_counters}. The delay counter $n$ advances on every beat and counts the position of the sample inside the current block, $0 \ldots D-1$, where $D = N/r$ is the delay of the stage for the selected configuration. When it wraps, the phase counter $p$ advances by one; $p$ counts the block, i.e. the arm of the butterfly the sample belongs to, $0 \ldots r-1$, and wraps at the radix. The beat is therefore mapped to the pair $(p, n)$, as illustrated by the example at the bottom of the figure.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figs/phase_delay_counters.pdf}
+    \caption{Phase and delay counters.}
+    \label{fig:phase_delay_counters}
+\end{figure}
+
+The two compare values $D-1$ and $r-1$ are the only inputs that depend on the configuration. They are registered once from the quasi-static configuration, so the per-beat wrap compares start from flip-flops and no subtractor sits on the counting path. The comparator outputs are exported as flags: last marks the final sample of a block and joint marks the final phase, in which the preadder is fed and the result FIFOs are written.
+
+Every stage contains two instances of this counter pair, one enabled by the input beats and one by the output beats. The input pair steers the input demultiplexer and the FIFO write enables and defines the joint phase; the output pair steers the output multiplexer and supplies $p$ and $n$ to the twiddle factor unit, which forms the exponent $k = p \cdot n$ from them. Because the two pairs run independently, the input and output sides of the stage are decoupled, as described in Section \ref{sec:flow_control}.
+
 \subsection{Control Logic}
 
+The control logic contains no state machine: all control is derived from the phase and delay counters and the quasi-static configuration. Its structure is shown in Figure \ref{fig:stage_control}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figs/stage_control.pdf}
+    \caption{Stage control logic.}
+    \label{fig:stage_control}
+\end{figure}
+
+The radix decode block translates the configured radix into the preadder select signals s0 and s1 (with the values given in the preadder figures) and into radix\_mask, which marks the delay FIFOs used by the selected radix; the FIFOs outside the mask are held inactive. The decode is registered, which is allowed because the configuration only changes between frames.
+
+The input phase $p$ directly drives the select of the input demultiplexer, and the one-hot encoder turns it into the write enables of the delay FIFOs, so every incoming sample is written into the FIFO of its arm. The write enables are qualified by the stage with the input handshake, so no gating is needed inside the control logic.
+
+\subsection{Flow Control}
+\label{sec:flow_control}
+
+The stages of the chain are connected with a ready/valid handshake on both faces. Figure \ref{fig:stage_flow_control} shows the data and control flow of one stage: the datapath in the top row and the control that steers it below, with the dashed line marking the border between the input flow and the output flow.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figs/stage_flow_control.pdf}
+    \caption{Data and control flow of the stage.}
+    \label{fig:stage_flow_control}
+\end{figure}
+
+The two flows are fully decoupled and meet only in the FIFOs. The input side runs on its own phase and delay counters, and its o\_ready logic stalls only on space: during the fill phases on the full flags of the delay FIFOs, and during the joint phase on the credit of the result FIFOs. The downstream i\_ready never enters this logic, so the stage keeps accepting samples and prefills the delay FIFOs for the next block while the results of the previous block are still being read out of the result FIFOs -- or are still waiting there because the receiving side is not ready yet.
+
+The output side drains the result FIFOs on its own counters. A drain gate releases a result only when its FIFO head is valid and the skid credit counter shows room, because a released word then spends ten cycles in the twiddle read and the rotator pipeline and cannot be stopped anymore. If i\_ready drops in the meantime, the word still lands safely in the output skid FIFO, whose depth covers all words in flight plus margin. The credit counter is incremented on every drain beat and decremented on every word delivered downstream (o\_valid and i\_ready), so the skid can never overflow.
+
+With this partitioning there is no combinational path from i\_ready to o\_ready or from i\_valid to o\_valid: i\_ready only pops the skid FIFO, and o\_ready is derived from registered FIFO state. The stages therefore chain without timing loops, and a stall on any face is absorbed locally by the FIFOs instead of rippling through the whole chain within one cycle.
+
+\subsection{Top-level control}
+
+The chain of stages needs a top-level control logic to coordinate the reconfiguration of the stages and data flow between the stages. It is shown in Figure \ref{fig:top_level_control}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1.3\textwidth,height=0.96\textheight,keepaspectratio]{figs/top_level_control.pdf}
+    \caption{Top level: AXI4-Lite configuration interface, shadow and active registers, chain of stages and AXI4-Stream ports.}
+    \label{fig:top_level_control}
+\end{figure}
+
+The core is configured over an AXI4-Lite slave with a small register map. The slave accepts the write address and data channels in the same beat and keeps a single transaction outstanding, which is sufficient for a quasi-static configuration. Every configurable value exists twice: software writes the shadow registers (CONFIG\_SEL, the FFT/IFFT flag and, derived from CONFIG\_SEL, the scaler constant), while the hardware only ever sees the active registers. The two are separated so that a new configuration can be written at any time without disturbing the frame that is currently in the chain.
+
+The transfer from shadow to active is done by the commit control. A write of CTRL.COMMIT sets commit\_pnd, which closes the input gate: the input tvalid is masked and tready is held low, so no new samples enter. The in-flight counter, incremented on every accepted input beat and decremented on every delivered output beat, tells when the chain is empty; at that moment the active registers are loaded from the shadow registers in one cycle and the gate reopens. Because the stages carry no state between frames once drained, no reset is needed. STATUS exposes BUSY (commit pending) and IDLE (in-flight counter at zero) so the software can poll the switch, or simply keep streaming while the gate handles the boundary.
+
+The stages inside the chain are connected only through their ready/valid handshakes, and the active configuration select is distributed to all of them. A stage whose slot is not needed by the active size bypasses itself through its output skid, so the stream is re-registered in every slot and there are no chain-level multiplexers. The final scaler multiplies the chain output by the residual gain $2^{S}/N$ of the active size (Section \ref{sec:scaling}), so that the output is delivered in the $X/N$ convention.
+
+The AXI4-Stream tlast marker is not carried through the chain. The delay FIFOs are set up for the active $N$, so an input tlast could not steer the datapath anyway; it is only checked by the input frame counter, and a tlast that does not fall on the last beat of a frame sets the sticky FRAMING\_ERR bit in STATUS. On the output side tlast is regenerated from the output frame counter, which counts modulo the active $N$. This is exact because a commit only lands when the chain is drained, i.e. on a frame boundary, and both counters are cleared at that point.
 
 \chapter{Software Reference Model}
 To implement the mixed-radix FFT algorithm in hardware, a software reference model must be developed. It is a software implementation of the mixed-radix FFT algorithm that is used for multiple purposes:
