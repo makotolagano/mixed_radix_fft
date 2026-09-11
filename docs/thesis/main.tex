@@ -44,10 +44,44 @@
 
 \begin{document}
 
+% Front page in Serbian (mirrors the layout of \maketitle from etf.cls)
+\begin{titlepage}
+\begin{center}
+    {\large \textsc{Univerzitet u Beogradu\\[.5ex]Elektrotehnički fakultet}\par}
+    \vskip 18ex
+    {\large {\normalsize \textsc{Master rad}}\par}
+    \vskip 12ex
+    {\LARGE Efikasna hardverska realizacija algoritma za brzu Furijeovu transformaciju sa mešovitim radiksom\par}
+    \vskip 2ex
+\end{center}\par
+\vfill \vfill
+mentor: \hspace*{\fill} student: \par
+dr Vladimir Petrović, docent \hspace*{\fill} Lazar Dobrić \par
+\hspace*{\fill} broj indeksa: 2024/3087 \par
+\vfill
+\begin{center}
+{\large Beograd, septembar 2026.}
+\end{center}
+\end{titlepage}
+
+% Front page in English
 \maketitle
 
+% Abstract in Serbian (mirrors the layout of the abstract/keywords environments from etf.cls)
+\begin{titlepage}
+\null\vfil
+\begin{center}
+\bfseries Apstrakt
+\end{center}
+U ovom radu je prikazana teorijska osnova algoritma za brzu Furijeovu transformaciju (FFT) sa mešovitim radiksom. Analizirani su algoritmi neophodni za njegovu realizaciju. Hardverska SDF (engl. \emph{Single-path Delay Feedback}) arhitektura za FFT je simulirana softverski. Hardverska realizacija FFT je izvedena na FPGA (\emph{Field-Programmable Gate Array}) čipu.
+
+\vspace{5ex}
+\parindent 0pt {\bfseries Ključne reči:} FFT sa mešovitim radiksom, SDF arhitektura, FPGA
+\par\vfil\null
+\end{titlepage}
+
 \begin{abstract}
-In this work, the theoretical background of the mixed-radix Fast Fourier Transform (FFT) algorithm is presented. The necessary algorithms for its implementation are analyzed. A Single-path Delay Feedback (SDF) hardware architecture for the FFT is simulated in software. The hardware implementation of the FFT is realized on a Field-Programmable Gate Array (FPGA) chip.
+In this work, the theoretical background of the mixed-radix Fast Fourier Transform (FFT) algorithm is presented. The necessary algorithms for its implementation are analyzed. A Single-path Delay Feedback (SDF) hardware architecture for the FFT is simulated in software. The hardware implementation of the FFT is realized on a FPGA (Field-Programmable Gate Array) chip.
 \end{abstract}
 
 \begin{keywords}
