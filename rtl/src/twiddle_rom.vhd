@@ -8,45 +8,27 @@ library work;
 use work.mr_fft_pkg.all;        -- t_cmplx_twiddle
 use work.twiddle_pkg.all;   -- t_config_arr, t_coef_rom, f_oct_*
 
--- ---------------------------------------------------------------------------
--- Octant-symmetry stored twiddle ROM.
+-- Twiddle ROM with octant symmetry.
 --
--- Holds ALL of a stage's configs (flat t_cmplx_twiddle ROM + per-config base/N/level
--- tables, built at elaboration). Runtime datapath is explicit logic: read per-config
--- params, fold the exponent, read the ROM, reconstruct with conjugate/negate/swap.
+-- one flat ROM holds the reduced twiddle set of every config of the stage,
+-- plus per-config base/N/level tables (all built at elaboration).
+-- the exponent k is folded to a stored index, a conjugate flag and a j^m
+-- unit code, the ROM is read synchronously (block RAM), and the twiddle is
+-- rebuilt with negate/swap muxes. k = 0 gives W = 1.
 --
---   inputs : config_sel (which config), k = phase*delay_cnt*R^stage_index  (0..N-1)
---   fold   : reduce k -> stored index r, flags conj + unit-code m (0..3: unit j^m)
---   read   : ROM[ base(config_sel) + r ]  -- SYNCHRONOUS (registered) so it maps to BRAM
---   recon  : if conj negate Im ; then apply j^m (swap/negate) -- muxes, no multiplier
---   k = 0 (arm 0) -> address base -> W = 1.
---
--- Pipeline (REGISTERED=true; REGISTERED=false leaves every stage comb),
--- one fold per stage so each cycle holds one compare + subtract:
---   stage 0a (comb)  : conjugate fold
---   stage 0b (reg+comb): fold register, then quarter fold
---   stage 0c (reg+comb): fold register, then octant fold + base add
---   stage 0d (reg)   : address register (isolates BRAM address setup)
---   stage 1  (reg)   : ROM read -- clocked -> block RAM
---   stage 1b (reg)   : optional BRAM output register (G_OUTPUT_REG)
---   stage 2  (reg)   : reconstruct (negate/swap muxes), registered output
--- REGISTERED latency: 5 cycles (+1 with G_OUTPUT_REG); the conj/unit flags
--- travel with the ROM word so reconstruct stays aligned in both modes.
--- ---------------------------------------------------------------------------
+-- pipeline (REGISTERED = true), one fold per cycle:
+--   0a conjugate fold, 0b quarter fold, 0c octant fold + base add,
+--   0d address register, 1 ROM read, 1b optional BRAM output register,
+--   2 reconstruct. latency 5 (+1 with G_OUTPUT_REG).
 entity twiddle_rom is
     generic (
         CONFIGS    : t_config_arr;                                -- all (radix,size) configs for this stage
         SEL_WIDTH  : natural := 6;                    -- config_sel width (>= clog2(CONFIGS'length))
         K_WIDTH    : natural := 12;                    -- k width (>= clog2(max config size))
         REGISTERED : boolean := true;
-        -- second read register stage: Vivado absorbs it as the BRAM's optional
-        -- output register (DOA_REG=1, fast clock-to-out instead of the slow
-        -- latch output). +1 cycle read latency; only meaningful with
-        -- REGISTERED and a block-RAM table.
+        -- extra read register, absorbed as the BRAM output register (+1 cycle)
         G_OUTPUT_REG : boolean := false;
-        -- Vivado rom_style for the coefficient table: inferred ROMs default to
-        -- LUTs even when large, so set "block" per instance where the table is
-        -- big (radix2/radix23 slots); keep "auto"/"distributed" for small ones
+        -- rom_style of the table, "block" for the big tables
         G_ROM_STYLE : string := "auto"
     );
     port (
@@ -58,11 +40,8 @@ entity twiddle_rom is
 end entity;
 
 architecture rtl of twiddle_rom is
-    -- Flat coefficient ROM as packed std_logic_vector words (re & im) so a registered
-    -- read maps to block RAM. (An array of records does not infer BRAM in Vivado.)
-    -- Held in a SIGNAL with an initial value (never written): Vivado does not
-    -- reliably map reads of a CONSTANT array onto RAMB primitives. The style
-    -- comes from the ROM_STYLE generic (per instance).
+    -- packed slv words so the read maps to block RAM. kept in a signal with an
+    -- initial value, Vivado does not map reads of a constant array onto BRAM.
     constant C_ROM_INIT : t_slv_rom := f_oct_rom(CONFIGS);
     signal   rom_mem    : t_slv_rom(C_ROM_INIT'range) := C_ROM_INIT;
 
@@ -79,43 +58,39 @@ attribute rom_style : string;
     constant C_CW   : natural    := c_twiddle_int_width + c_twiddle_frac_width;  -- bits per component
 
 
-    -- per-config fold parameters, registered when REGISTERED (i_config_sel
-    -- is quasi-static, so the 53-entry table reads leave the per-beat path)
+    -- per-config fold parameters, registered (config_sel is quasi-static)
     signal base_p          : natural range 0 to C_ROM_INIT'length-1;
     signal lvl_p           : natural range 1 to 3;
     signal n_p, n2_p, n4_p : unsigned(C_WW-1 downto 0);
     signal n8_p            : unsigned(C_WW-1 downto 0);
     signal bn4_p           : unsigned(C_PW-1 downto 0);      -- base + N/4 (octant branch)
 
-    -- stage 0a (conjugate fold) -> stage 0b (the conjugate fold never
-    -- touches m, so no m here)
+    -- stage 0a -> 0b
     signal r1, r1_s    : unsigned(C_WW-1 downto 0);
     signal conj1, conj1_s : std_logic;
 
-    -- stage 0b (quarter fold) -> stage 0c
+    -- stage 0b -> 0c
     signal r2, r2_s    : unsigned(C_WW-1 downto 0);
     signal conj2, conj2_s : std_logic;
     signal m2, m2_s    : unsigned(1 downto 0);
 
-    -- stage 0c -> stage 0d : folded ROM address + reconstruct flags. The
-    -- address wraps (unsigned truncation) during a config-switch transient;
-    -- the guarded read below keeps the discarded transient legal in sim.
+    -- stage 0c -> 0d: ROM address and reconstruct flags. the address may wrap
+    -- during a config switch, the guarded read keeps that legal in sim.
     signal addr      : unsigned(C_AW-1 downto 0);
     signal conjugate : std_logic;
     signal m         : unsigned(1 downto 0); -- unit j^m
 
-    -- stage 0d (address register) -> stage 1: the read cycle then holds only
-    -- the register -> BRAM routing plus the read guard
+    -- stage 0d -> 1
     signal addr_r : unsigned(C_AW-1 downto 0);
     signal conj_b : std_logic;
     signal m_b    : unsigned(1 downto 0);
 
-    -- stage 1 (ROM read) outputs -- the single register when REGISTERED = true
+    -- stage 1 (ROM read)
     signal rom_q       : std_logic_vector(c_twiddle_word_w-1 downto 0);
     signal conjugate_q : std_logic;
     signal m_q         : unsigned(1 downto 0);
 
-    -- optional stage 1b (BRAM output register) -- pass-through when disabled
+    -- stage 1b (optional output register)
     signal rom_q2       : std_logic_vector(c_twiddle_word_w-1 downto 0);
     signal conjugate_q2 : std_logic;
     signal m_q2         : unsigned(1 downto 0);
@@ -124,7 +99,7 @@ attribute rom_style : string;
     signal twiddle_c   : t_cmplx_twiddle;
 begin
 
-    -- ---- per-config fold parameters (table reads off the per-beat path) ----
+    -- per-config fold parameters
     params_reg_g : if REGISTERED generate
         process (i_clk)
             variable v_sel : natural;
@@ -161,7 +136,7 @@ begin
         end process;
     end generate;
 
-    -- ---- stage 0a (comb): conjugate fold (2k > N <=> k > N/2 exactly) ----
+    -- stage 0a: conjugate fold (k > N/2)
     fold_a : process (i_k, n_p, n2_p)
         variable v_r : unsigned(C_WW-1 downto 0);
     begin
@@ -189,7 +164,7 @@ begin
         conj1_s <= conj1;
     end generate;
 
-    -- ---- stage 0b (comb): quarter fold, t=-1 (4r > N <=> r > N/4) ----
+    -- stage 0b: quarter fold (r > N/4)
     fold_b : process (r1_s, conj1_s, n2_p, n4_p, lvl_p)
     begin
         if lvl_p >= 2 and r1_s > n4_p then
@@ -219,14 +194,12 @@ begin
         m2_s    <= m2;
     end generate;
 
-    -- ---- stage 0c (comb): octant fold + base add -> ROM address ----
-    -- folded address is (base + N/4) - r with bn4_p precomputed, so both
-    -- branches are ONE adder deep and run in parallel; the compare
-    -- (8r > N <=> r > N/8) only drives the selects
+    -- stage 0c: octant fold (r > N/8) and base add. both branches are one adder
+    -- deep because base + N/4 is precomputed.
     fold_c : process (r2_s, conj2_s, m2_s, n8_p, lvl_p, base_p, bn4_p)
         variable v_fold : boolean;
     begin
-        v_fold := lvl_p >= 3 and r2_s > n8_p;            -- octant fold (t=-j; +j if conjugate)
+        v_fold := lvl_p >= 3 and r2_s > n8_p;            -- t = -j, or +j if conjugate
 
         if v_fold then
             addr      <= resize(bn4_p - r2_s, C_AW);
@@ -239,8 +212,7 @@ begin
         end if;
     end process;
 
-    -- ---- stage 0d: address register (REGISTERED mode) -- isolates the BRAM
-    --      address setup (or LUT-ROM decode) from the fold logic ----
+    -- stage 0d: address register
     addr_reg_g : if REGISTERED generate
         process (i_clk) begin
             if rising_edge(i_clk) then
@@ -257,13 +229,11 @@ begin
         m_b    <= m;
     end generate;
 
-    -- ---- stage 1: ROM read.  Registered -> block RAM, 1-cycle latency;
-    --      combinational -> distributed ROM, 0 latency.  Flags travel with the ROM word.
+    -- stage 1: ROM read, the flags travel with the word
     read_reg_g : if REGISTERED generate
         process (i_clk) begin
             if rising_edge(i_clk) then
-                -- read guard: a wrapped transient address (config switch)
-                -- reads nothing -- keeps the array index legal in simulation
+                -- guard: a wrapped transient address reads nothing
                 if to_integer(addr_r) <= C_ROM_INIT'length - 1 then
                     rom_q <= rom_mem(to_integer(addr_r));
                 end if;
@@ -279,7 +249,7 @@ begin
         m_q   <= m_b;
     end generate;
 
-    -- ---- stage 1b: optional BRAM output register (flags travel along) ----
+    -- stage 1b: optional BRAM output register
     out_reg_g : if G_OUTPUT_REG generate
         process (i_clk) begin
             if rising_edge(i_clk) then
@@ -296,9 +266,7 @@ begin
         m_q2         <= m_q;
     end generate;
 
-    -- ---- stage 2: unpack the ROM word and reconstruct ----
-    -- negations in parallel off the raw word, then a 4:1 mux per component:
-    -- one carry-chain level (chaining conjugate then j^m would need two)
+    -- stage 2: unpack and reconstruct. negations first, then one 4:1 mux per component.
     recon : process (rom_q2, conjugate_q2, m_q2)
         variable a, b, na, nb : sfixed(C_HI downto C_LO);
     begin
@@ -324,7 +292,7 @@ begin
         end case;
     end process;
 
-    -- reconstruct output register (REGISTERED mode)
+    -- output register
     recon_reg_g : if REGISTERED generate
         process (i_clk) begin
             if rising_edge(i_clk) then

@@ -5,10 +5,8 @@ library work;
 use work.mr_fft_pkg.all;
 use work.mr_fft_cfg_pkg.all;
 
--- Synthesis smoke-test wrapper: concrete generics (default: first radix235
--- slot of the mid-bypass pipeline) so ghdl --synth can elaborate the stage.
--- G_SLOT is overridable (xelab -generic_top "G_SLOT=n") to probe any single
--- chain slot in isolation, e.g. when hunting simulator crashes.
+-- Synthesis wrapper with concrete generics so one stage can be elaborated alone.
+-- G_SLOT picks the chain slot.
 entity mr_fft_stage_synth is
   generic (
     G_SLOT : natural := c_num_r2_slots + c_num_r23_slots
@@ -30,9 +28,7 @@ architecture rtl of mr_fft_stage_synth is
   constant C_SLOT : natural := G_SLOT;
 begin
   dut : entity work.mr_fft_stage
-    -- pin the twiddle table into block RAM: under "auto" Vivado's ROM
-    -- placement is a heuristic and flip-flops between runs; use "auto"
-    -- only for the small radix235 slots (LUT-ROM intended there)
+    -- pin the twiddle table into block RAM, "auto" placement is not stable
     generic map (G_CAPABILITY => f_slot_capability(C_SLOT), G_CONFIGS => f_slot_configs(C_SLOT),
                  G_TWIDDLE_ROM_STYLE => "block")
     port map (

@@ -7,31 +7,20 @@ use ieee.fixed_float_types.all;
 library work;
 use work.mr_fft_pkg.all;
 
--- Final scaler: o_sample = i_sample * c, where c = 2**total_shift / N is the
--- ACTIVE config's residual gain (u2.<c_scale_frac> code on i_scale, from the
--- c_fft_scales elaboration table, s<c_scale_int>.<c_scale_frac>) --
--- turning the chain's X * 2**(-total_shift)
--- output into the classical X/N convention. c is real, so each component is
--- ONE 25x18 multiply: the 25-bit constant rides the DSP A port, the data
--- word the 18-bit B port, and the half-up exit rounding constant (+half LSB
--- of the memory word) rides the post-adder C port, so the M/P registers
--- absorb the pipeline registers.
+-- Final scaler: o_sample = i_sample * c, c = 2**total_shift / N of the active
+-- config, so the output follows the X/N convention. c is real, so one 25x18
+-- multiply per component: constant on the DSP A port, data on the B port,
+-- rounding constant on the C port.
 --
--- Pipeline (free-running, valid sideband, same recipe as mr_fft_rotator):
---   stage A: operand register
---   stage B: biased product (data * c + half) -> DSP M/P register
---   stage C: truncate to the memory word (the ONE rounding, wrap)
--- A credit-gated output skid keeps the handshake registered: o_ready is the
--- (registered) credit state, never a combinational path from i_ready.
---
--- i_scale is quasi-static: change it only when the scaler is drained (the
--- top switches it together with the config at a committed drain boundary).
+-- pipeline: A operand register, B biased product (M/P regs), C truncate.
+-- a credit gated skid keeps o_ready registered.
+-- i_scale is quasi-static, the top changes it together with the config.
 entity mr_fft_scaler is
 	port (
 		i_clk   : in  std_logic;
 		i_reset : in  std_logic;
 
-		-- s<c_scale_int>.<c_scale_frac> scale code of the active config (quasi-static)
+		-- scale code of the active config
 		i_scale : in  std_logic_vector(c_scale_int + c_scale_frac - 1 downto 0);
 
 		-- input stream handshake
@@ -52,11 +41,11 @@ architecture rtl of mr_fft_scaler is
 	constant C_SKID_DEPTH : natural := C_LAT + 3;
 
 	subtype t_scale is sfixed(c_scale_int - 1 downto -c_scale_frac);
-	-- data (s2.16) x scale (s4.21) product, plus the rounding bias headroom
+	-- data x scale product
 	subtype t_prod is sfixed(c_fxp_int_width + c_scale_int - 1
 	                         downto -(c_fxp_frac_width + c_scale_frac));
 
-	-- half-up exit rounding constant: +half LSB of the memory word
+	-- half-up rounding constant, half LSB of the data word
 	constant c_half : sfixed(0 downto -(c_fxp_frac_width + 1)) :=
 		to_sfixed(2.0 ** (-(c_fxp_frac_width + 1)), 0, -(c_fxp_frac_width + 1));
 
@@ -72,7 +61,7 @@ architecture rtl of mr_fft_scaler is
 	-- valid sideband (A, B, C)
 	signal v : std_logic_vector(1 to C_LAT);
 
-	-- output skid + credit (in-flight words counted -> no overflow possible)
+	-- output skid and credit
 	signal skid_we, skid_re  : std_logic;
 	signal skid_data         : t_cmplx;
 	signal skid_out          : t_cmplx;
@@ -95,14 +84,13 @@ begin
 			-- stage A
 			a_r <= i_sample;
 
-			-- stage B: one real multiply per component, trim bias on the
-			-- DSP post-adder
+			-- stage B: one real multiply per component, rounding bias on the post-adder
 			p_re_r <= resize(a_r.re * scale_fx + c_half, c_fxp_int_width + c_scale_int - 1,
 			                 -(c_fxp_frac_width + c_scale_frac), fixed_wrap, fixed_truncate);
 			p_im_r <= resize(a_r.im * scale_fx + c_half, c_fxp_int_width + c_scale_int - 1,
 			                 -(c_fxp_frac_width + c_scale_frac), fixed_wrap, fixed_truncate);
 
-			-- stage C: the single truncation to the memory word (wrap)
+			-- stage C: truncate to the data word
 			skid_data.re <= resize(p_re_r, skid_data.re, fixed_wrap, fixed_truncate);
 			skid_data.im <= resize(p_im_r, skid_data.im, fixed_wrap, fixed_truncate);
 

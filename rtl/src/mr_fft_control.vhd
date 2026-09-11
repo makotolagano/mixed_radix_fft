@@ -20,20 +20,17 @@ entity mr_fft_control is
 
 		i_config : in  t_config;
 
-		-- INPUT-side phase (the output side has its own counters in the stage)
+		-- input side phase
 		i_phase : in  std_logic_vector(clogb2(G_MAX_RADIX) - 1 downto 0);
 
-		-- constants for the current configuration
+		-- preadder mux controls
 		o_config_s0 : out std_logic_vector(1 downto 0);
 		o_config_s1 : out std_logic;
 
 		-- input demux (which FIFO takes the incoming sample)
 		o_input_demux_sel : out std_logic_vector(clogb2(G_MAX_RADIX-1) - 1 downto 0);
 
-		-- Delay-FIFO write select: one-hot(i_phase). Ungated -- the stage
-		-- qualifies it with "input beat during a fill phase" (the delay FIFOs
-		-- only ever hold input samples; butterfly results go to the result
-		-- FIFOs at the preadder pipeline output).
+		-- delay FIFO write select, one-hot of i_phase. the stage gates it with the input beat.
 		o_fifos_we : out std_logic_vector(G_MAX_RADIX - 2 downto 0);
 		o_radix_mask : out std_logic_vector(G_MAX_RADIX - 2 downto 0)
     );
@@ -46,10 +43,10 @@ architecture rtl of mr_fft_control is
 	signal radix_mask : std_logic_vector(G_MAX_RADIX - 2 downto 0);
 begin
 
-	-- Input demux based on the input phase
+	-- input demux follows the input phase
 	o_input_demux_sel <= i_phase(o_input_demux_sel'length - 1 downto 0);
 
-	-- registered decode (quasi-static; settle covered by the stage's guard)
+	-- registered decode (quasi-static)
 	PROC_RADIX_MASK: process(i_clk)
 	begin
 		if rising_edge(i_clk) then

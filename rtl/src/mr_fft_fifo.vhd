@@ -6,8 +6,7 @@ use ieee.fixed_pkg.all;
 library work;
 use work.mr_fft_pkg.all;
 
--- Complex-sample wrapper around the show-ahead FIFO: o_rd_sample always
--- presents the oldest sample (o_rd_valid flags it), i_rd_en pops it.
+-- Complex sample wrapper around the show-ahead FIFO.
 entity mr_fft_fifo is
 	generic (
 		G_DEPTH 		 : integer := 1024;
@@ -30,7 +29,7 @@ end entity mr_fft_fifo;
 
 architecture rtl of mr_fft_fifo is
 
-  constant C_FIFO_DATA_WIDTH : integer := 2*c_fxp_word_width; -- Width of each FIFO data
+  constant C_FIFO_DATA_WIDTH : integer := 2*c_fxp_word_width; -- re & im
   signal input_sample : std_logic_vector(C_FIFO_DATA_WIDTH - 1 downto 0);
   signal output_sample : std_logic_vector(C_FIFO_DATA_WIDTH - 1 downto 0);
 

@@ -7,42 +7,25 @@ library work;
 use work.mr_fft_pkg.all;
 use work.mr_fft_cfg_pkg.all;
 
--- ---------------------------------------------------------------------------
--- Mixed-radix FFT top: the mid-bypass chain plus an AXI4-Lite configuration
--- interface. Single clock domain (AXI and stream share i_clk).
+-- Mixed-radix FFT top: the stage chain plus an AXI4-Lite config interface.
+-- one clock domain.
 --
--- Register map (32-bit registers, byte addresses):
---   0x00  ID           RO  x"0FF70100" (FFT core, v1.0)
---   0x04  CTRL         WO  bit0 COMMIT (self-clearing), bit1 CLR_FERR
---   0x08  STATUS       RO  bit0 BUSY (commit pending), bit1 IDLE (in_flight=0),
---                          bit3 FRAMING_ERR (sticky, clear via CTRL.CLR_FERR)
---   0x0C  CONFIG_SEL   RW  SHADOW config select (index into c_fft_sizes)
---   0x10  CONFIG_ACTIVE RO active (committed) config select
---   0x14  IN_FLIGHT    RO  input beats minus output beats inside the chain
---   0x18  FFT_SIZE     RO  N of the ACTIVE config (from c_fft_sizes)
---   0x1C  SCALE        RO  active final-scaler code (s<c_scale_int>.<c_scale_frac>)
+-- register map (byte addresses):
+--   0x00  ID            RO  x"0FF70100"
+--   0x04  CTRL          WO  bit0 COMMIT, bit1 CLR_FERR, bit2 IFFT
+--   0x08  STATUS        RO  bit0 BUSY, bit1 IDLE, bit2 IFFT, bit3 FRAMING_ERR (sticky)
+--   0x0C  CONFIG_SEL    RW  shadow config select
+--   0x10  CONFIG_ACTIVE RO  active config select
+--   0x14  IN_FLIGHT     RO  input beats minus output beats
+--   0x18  FFT_SIZE      RO  N of the active config
+--   0x1C  SCALE         RO  active final scaler code
 --
--- Output convention: the final scaler (mr_fft_scaler) multiplies the chain
--- output by the active config's residual gain 2**total_shift / N, so
--- o_sample delivers the classical X/N -- no external rescaling needed.
+-- CONFIG_SEL writes go to a shadow register. COMMIT closes the input, waits
+-- until IN_FLIGHT is 0, copies shadow to active and reopens the input.
+-- commit only after whole frames, a partial frame never drains.
 --
--- Configuration protocol (encodes the drained-switch contract in hardware):
--- writes to CONFIG_SEL land in a shadow register only. Writing CTRL.COMMIT
--- gates the input stream (o_ready forced low), waits until the chain is
--- drained (IN_FLIGHT = 0 -- exact, by the chain's beat conservation), then
--- transfers shadow -> active in one cycle and reopens the input. Software:
--- write CONFIG_SEL, write COMMIT, poll STATUS.BUSY = 0 (or just keep
--- streaming: the gate handles the boundary). NOTE: commit only after WHOLE
--- frames have been offered -- a partial frame parks samples in the delay
--- FIFOs and IN_FLIGHT never reaches zero (STATUS makes this visible).
---
--- Frame marker (AXI-Stream tlast semantics): o_last is REGENERATED from a
--- mod-N output beat counter (N of the ACTIVE config), never forwarded from
--- the input -- exact because a commit only lands with the chain drained on a
--- frame boundary. i_last cannot steer the datapath (the delay FIFOs are
--- configured for N), so it is only checked: an accepted beat where i_last
--- disagrees with the input beat counter sets the sticky STATUS.FRAMING_ERR.
--- ---------------------------------------------------------------------------
+-- o_last is regenerated from a mod-N output counter. i_last is only checked
+-- against the input counter and sets FRAMING_ERR on a mismatch.
 entity mr_fft_top is
 	generic (
 		G_PIPELINE : boolean := true
@@ -103,10 +86,10 @@ architecture rtl of mr_fft_top is
 	constant C_ZERO_EXT : std_logic_vector(27 downto 0) := (others => '0');
 
 
-	-- generous upper bound on words inside the chain (FIFOs + skids + pipes)
+	-- upper bound on words inside the chain
 	constant C_INFLIGHT_W : natural := 16;
 
-	-- frame beat counters count 0 .. N-1 (N <= c_max_fft_size)
+	-- frame beat counters, 0 .. N-1
 	constant C_BEAT_W : natural := clogb2(c_max_fft_size);
 
 	-- configuration registers
@@ -125,8 +108,7 @@ architecture rtl of mr_fft_top is
 	signal in_beat     : std_logic;
 	signal out_beat    : std_logic;
 
-	-- final scaler plumbing; active_scale is registered at commit so the
-	-- constant table sits off every live timing path
+	-- final scaler, the scale is registered at commit
 	signal chain_sample : t_cmplx;
 	signal scaler_ready : std_logic;
 	signal scaler_valid : std_logic;
@@ -171,9 +153,7 @@ begin
 			i_ready  => scaler_ready
 		);
 
-	-- final scaler: X * 2**(-total_shift) -> X/N via the active config's
-	-- residual-gain constant (c_fft_scales); registered handshake via its
-	-- own credit-gated skid, so the in-flight counter drains through it
+	-- final scaler: X * 2**(-total_shift) -> X/N
 	SCALER_INST: entity work.mr_fft_scaler
 		port map (
 			i_clk    => i_clk,
@@ -209,10 +189,7 @@ begin
 		end if;
 	end process PROC_IN_FLIGHT;
 
-	-- ------------------------------------------------------------------
-	-- frame markers: o_last regenerated from a mod-N output beat counter;
-	-- i_last only CHECKED against the input beat counter (sticky error)
-	-- ------------------------------------------------------------------
+	-- frame markers: o_last from the output counter, i_last only checked
 	active_n_m1 <= to_unsigned(
 	    c_fft_sizes(minimum(to_integer(active_sel), c_num_configs - 1)) - 1,
 	    C_BEAT_W);
@@ -227,7 +204,7 @@ begin
 				out_cnt     <= (others => '0');
 				framing_err <= '0';
 			else
-				-- CTRL.CLR_FERR; a same-cycle framing error below wins
+				-- CTRL.CLR_FERR, a framing error in the same cycle wins
 				if wr_beat = '1' and s_axi_wdata(1) = '1'
 				   and to_integer(unsigned(s_axi_awaddr)) = C_ADDR_CTRL then
 					framing_err <= '0';
@@ -239,7 +216,7 @@ begin
 					else
 						in_cnt <= in_cnt + 1;
 					end if;
-					-- i_last must mark exactly the final beat of each frame
+					-- i_last must mark the last beat of the frame
 					if (i_last = '1') /= (in_cnt = active_n_m1) then
 						framing_err <= '1';
 					end if;
@@ -253,9 +230,7 @@ begin
 					end if;
 				end if;
 
-				-- defensive: both counters are provably 0 when a commit
-				-- lands (whole-frame drain); clear anyway so a framing slip
-				-- cannot survive a reconfiguration
+				-- both counters should already be 0 here, clear anyway
 				if commit_pnd = '1' and in_flight = 0 and in_beat = '0' then
 					in_cnt  <= (others => '0');
 					out_cnt <= (others => '0');
@@ -264,9 +239,7 @@ begin
 		end if;
 	end process PROC_FRAME;
 
-	-- ------------------------------------------------------------------
-	-- commit FSM: gate input -> wait drained -> apply shadow
-	-- ------------------------------------------------------------------
+	-- commit: gate input, wait for drain, apply shadow
 	PROC_COMMIT: process(i_clk)
 	begin
 		if rising_edge(i_clk) then
@@ -301,9 +274,7 @@ begin
 		end if;
 	end process PROC_COMMIT;
 
-	-- ------------------------------------------------------------------
-	-- AXI4-Lite slave: aw+w accepted together, single outstanding
-	-- ------------------------------------------------------------------
+	-- AXI4-Lite slave: aw and w accepted together, one outstanding transaction
 	wr_beat <= awready and s_axi_awvalid and s_axi_wvalid;
 
 	PROC_AXI_WR: process(i_clk)
@@ -329,8 +300,7 @@ begin
 		end if;
 	end process PROC_AXI_WR;
 
-	-- accept aw and w in the same beat (awready/wready pulse together);
-	-- register writes happen on wr_beat inside PROC_COMMIT
+	-- register writes happen on wr_beat in PROC_COMMIT
 	s_axi_awready <= awready;
 	s_axi_wready  <= wready;
 	s_axi_bvalid  <= bvalid;

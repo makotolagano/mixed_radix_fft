@@ -7,30 +7,20 @@ library work;
 use work.mr_fft_pkg.all;
 use work.mr_fft_cfg_pkg.all;
 
--- ---------------------------------------------------------------------------
--- Mixed-radix FFT pipeline: the c_num_slots stages of the (forward)
--- mid-bypass layout chained directly through their ready/valid handshakes.
+-- Chain of c_num_slots stages connected through ready/valid.
 --
---   [ radix2 x c_num_r2_slots ][ radix23 x c_num_r23_slots ][ radix235 x ... ]
+--   [ radix2 x c_num_r2_slots ][ radix23 x c_num_r23_slots ][ radix235 x c_num_r235_slots ]
 --
--- i_config_sel picks the FFT length (index into c_fft_sizes) and is the ONLY
--- configuration signal: every stage derives its own (radix, delay, bypass)
--- from its per-slot G_CONFIGS table (f_slot_configs). A slot whose entry is
--- (1, 1) BYPASSES itself -- accepted samples pass straight through its output
--- skid buffer, so the stream is re-registered at every slot and there are no
--- chain-level bypass muxes (no multi-slot combinational paths).
+-- i_config_sel selects the FFT length, every stage looks up its own
+-- (radix, delay, bypass) from its G_CONFIGS table. a bypassed stage still
+-- registers the stream through its output skid, so there are no long
+-- combinational paths across slots.
 --
--- Reconfiguration contract (inherited from the stage): feed whole frames,
--- wait until all outputs are delivered (output count = input count), then
--- change i_config_sel -- no reset needed. i_reset only at power-up.
+-- reconfigure only when drained: feed whole frames, wait for all outputs,
+-- then change i_config_sel. no reset needed.
 --
--- NOTE: every stage applies the FIXED scaling schedule -- an output right-
--- shift of ceil(log2(radix)) (2->1, 3->2, 5->3) fused into the preadder's
--- half-up exit rounding -- so the chain output is X_k * 2**(-total_shift).
--- The residual gain vs the DFT/N convention is 2**total_shift / N (between
--- 1 and 2 per config); apply it downstream if absolute scaling matters
--- (matches the Python golden model's FinalScaler).
--- ---------------------------------------------------------------------------
+-- every stage shifts its output right by ceil(log2(radix)), so the chain
+-- output is X * 2**(-total_shift). the final scaler in the top fixes the gain.
 entity mr_fft_chain is
 	generic (
 		G_PIPELINE : boolean := true
@@ -39,7 +29,7 @@ entity mr_fft_chain is
 		i_clk   : in  std_logic;
 		i_reset : in  std_logic;
 
-		-- FFT length select: index into c_fft_sizes (change only when drained)
+		-- FFT length select, change only when drained
 		i_config_sel : in std_logic_vector(clogb2(c_num_configs) - 1 downto 0);
 
 		-- input stream handshake
@@ -76,8 +66,7 @@ begin
 	GEN_SLOTS: for s in 0 to c_num_slots - 1 generate
 		constant C_CAP  : natural := f_slot_capability(s);
 		constant C_CFGS : t_config_arr(0 to c_num_configs - 1) := f_slot_configs(s);
-		-- big twiddle tables (radix2/radix23 slots) go to block RAM; the small
-		-- radix235 ones stay in LUTs
+		-- big twiddle tables go to block RAM, the small radix235 ones stay in LUTs
 		constant C_ROM_BLOCK : boolean := C_CAP /= 2;
 		constant C_FIFO_RAM_STYLE : string := f_ram_style(get_delay_cnt(C_CFGS));
 	begin

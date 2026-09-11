@@ -32,8 +32,7 @@ architecture rtl of mr_fft_phase_delay_gen is
 	signal phase_cnt : unsigned(clogb2(G_MAX_RADIX) - 1 downto 0) := (others => '0');
 	signal delay_cnt : unsigned(clogb2(G_DELAY_CNT) - 1 downto 0) := (others => '0');
 
-	-- registered "-1" compare values, so the per-beat wrap compares start
-	-- from flops instead of a decrementer carry chain
+	-- registered -1 values so the wrap compares start from flops
 	signal radix_m1 : unsigned(clogb2(G_MAX_RADIX) - 1 downto 0);
 	signal delay_m1 : unsigned(clogb2(G_DELAY_CNT) - 1 downto 0);
 begin

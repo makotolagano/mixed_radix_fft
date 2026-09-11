@@ -8,15 +8,9 @@ use ieee.math_real.all;
 library work;
 use work.mr_fft_pkg.all;        -- t_cmplx_twiddle, c_twiddle_int_width, c_twiddle_frac_width
 
--- ---------------------------------------------------------------------------
--- Octant-symmetry stored twiddle ROM package.
---
--- Computes at ELABORATION, from a stage's config list, one flat coefficient ROM holding
--- every config's octant/quarter/half-reduced set of W_N^n as t_cmplx_twiddle (sfixed,
--- from mr_fft_pkg), plus per-config base/N/level tables. Fold + reconstruct is in
--- twiddle_rom. Reduction level from N: N%4==0 -> octant (N/8+1), even -> quarter
--- (N/4+1), odd -> half ((N-1)/2+1).
--- ---------------------------------------------------------------------------
+-- Twiddle ROM package: builds, at elaboration, one flat ROM with the reduced
+-- twiddle set of every config plus per-config base/N/level tables.
+-- reduction level: N%4==0 octant (N/8+1 words), even quarter (N/4+1), odd half ((N-1)/2+1).
 package twiddle_pkg is
 
     constant c_twiddle_word_w : natural := 2 * (c_twiddle_int_width + c_twiddle_frac_width);
@@ -39,8 +33,8 @@ end package twiddle_pkg;
 
 package body twiddle_pkg is
 
-    constant HI : integer := c_twiddle_int_width - 1;    --  1
-    constant LO : integer := -c_twiddle_frac_width;      -- -15
+    constant HI : integer := c_twiddle_int_width - 1;
+    constant LO : integer := -c_twiddle_frac_width;
 
     function f_level(N : natural) return natural is
     begin

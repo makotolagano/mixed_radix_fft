@@ -7,19 +7,13 @@ use ieee.fixed_float_types.all;
 library work;
 use work.mr_fft_pkg.all;
 
--- Rotator: o_sample = i_sample * i_twiddle, bit-exact to the mr_fft_pkg "*"
--- operator (full-precision 4-multiplier complex product, ONE final half-up
--- exit rounding: +half LSB then truncate, wrap).
+-- Rotator: o_sample = i_sample * i_twiddle, same result as the mr_fft_pkg "*"
+-- operator (4 multipliers, one half-up rounding at the exit).
 --
--- G_PIPELINE = false: combinational (original behavior), latency 0.
--- G_PIPELINE = true : rotator_latency(true) = 5 register stages, placed so
--- Vivado absorbs them into the four DSP48E1s:
---   stage A1/A2: operand registers, both   -> DSP A/B input registers
---   stage B: the four 18x18 products       -> DSP M registers
---   stage C: full-precision sum/difference -> DSP post-adders / P registers
---   stage D: rounded resize to the data word (fabric)
--- The datapath free-runs (no enables); the valid bit travels alongside, so
--- the consumer qualifies outputs exactly like the preadder pipeline.
+-- G_PIPELINE = false: combinational.
+-- G_PIPELINE = true : 5 register stages placed so they land in the DSP48E1:
+--   A1/A2 operand registers, B products (M regs), C sum/difference (P regs),
+--   D rounding to the data word. no enables, the valid bit travels alongside.
 entity mr_fft_rotator is
 	generic (
 		G_PIPELINE : boolean := true
@@ -39,13 +33,13 @@ end entity mr_fft_rotator;
 
 architecture rtl of mr_fft_rotator is
 
-	-- one 18x18 product: (data int + twiddle int) ints, summed frac bits
+	-- one 18x18 product
 	subtype t_prod is sfixed(c_fxp_int_width + c_twiddle_int_width - 1
 	                         downto -(c_fxp_frac_width + c_twiddle_frac_width));
-	-- product sum/difference: one growth bit (same shape as t_cmplx_mult)
+	-- product sum, one growth bit
 	subtype t_prod_sum is sfixed(c_fxp_int_width + c_twiddle_int_width
 	                             downto -(c_fxp_frac_width + c_twiddle_frac_width));
-	-- half-up exit rounding constant: +half LSB of the memory word
+	-- half-up rounding constant, half LSB of the data word
 	constant c_half : sfixed(0 downto -(c_fxp_frac_width + 1)) :=
 		to_sfixed(2.0 ** (-(c_fxp_frac_width + 1)), 0, -(c_fxp_frac_width + 1));
 
@@ -95,8 +89,7 @@ begin
 				re_full <= p_ac - p_bd;
 				im_full <= p_ad + p_bc;
 
-				-- stage D: the single wrap + half-up quantization (+half LSB
-				-- then truncate), identical to the mr_fft_pkg "*" operator
+				-- stage D: half-up rounding, same as the "*" operator
 				o_sample.re <= resize(re_full + c_half, o_sample.re, fixed_wrap, fixed_truncate);
 				o_sample.im <= resize(im_full + c_half, o_sample.im, fixed_wrap, fixed_truncate);
 

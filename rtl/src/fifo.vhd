@@ -11,8 +11,7 @@ entity fifo is
 		i_clk 		: in std_logic;
 		i_reset 	: in std_logic;
 
-		-- runtime "virtual" depth: full/almost_full trip at this occupancy, so a
-		-- physically deeper FIFO behaves as one of this depth (defaults to G_DEPTH)
+		-- runtime depth: full trips at this occupancy
 		i_virtual_depth : in integer range 1 to G_DEPTH := G_DEPTH;
 
 		i_wr_en 	: in std_logic;
@@ -51,8 +50,7 @@ architecture rtl of fifo is
 	type t_mem is array (0 to G_DEPTH-1) of std_logic_vector(G_DATA_WIDTH-1 downto 0);
 	signal fifo_mem : t_mem;
 
-	-- Pointers wrap at G_DEPTH (not necessarily a power of two), so an
-	-- occupancy counter is used to distinguish full from empty.
+	-- pointers wrap at G_DEPTH, count tells full from empty
 	signal wr_ptr : unsigned(C_ADDR_W-1 downto 0) := (others => '0');
 	signal rd_ptr : unsigned(C_ADDR_W-1 downto 0) := (others => '0');
 	signal count  : unsigned(C_CNT_W-1 downto 0)  := (others => '0');
@@ -60,11 +58,11 @@ architecture rtl of fifo is
 	signal full_s  : std_logic;
 	signal empty_s : std_logic;
 
-	-- Qualified enables (write only when space, read only when data).
+	-- write only when there is space, read only when there is data
 	signal do_wr : std_logic;
 	signal do_rd : std_logic;
 
-	-- Registered memory read data and the virtual-depth-1 bypass register.
+	-- registered read data and the depth 1 bypass register
 	signal mem_rd_data : std_logic_vector(G_DATA_WIDTH-1 downto 0);
 	signal bypass_reg  : std_logic_vector(G_DATA_WIDTH-1 downto 0);
 
@@ -108,10 +106,8 @@ begin
 		end if;
 	end process;
 
-	-- Virtual-depth-1 bypass: the memory path has a 2-cycle minimum latency
-	-- (write edge + registered read edge), so depth 1 is served by a plain
-	-- register instead. Written on raw i_wr_en (NOT do_wr): at depth 1 the
-	-- memory-path occupancy pins at virtual-full, which would block do_wr.
+	-- depth 1 bypass: the memory path needs 2 cycles, so depth 1 uses a plain
+	-- register. written on raw i_wr_en, the memory path reads as full at depth 1.
 	PROC_BYPASS_REG: process(i_clk)
 	begin
 		if rising_edge(i_clk) then

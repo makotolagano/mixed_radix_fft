@@ -5,39 +5,26 @@ use ieee.fixed_float_types.all;
 use ieee.math_real.all;
 
 
--- Mixed Rardix FFT Package Declaration Section
+-- Mixed radix FFT package
 package mr_fft_pkg is
 
-	-- "18 bits in memory, wide in flight" (docs/datapath_width_convention.md):
-	-- every stored/streamed word (FIFOs, BRAM, inter-stage links, DSP inputs)
-	-- is the s2.16 data word; inside the preadder the datapath is wider and
-	-- NEVER re-quantized mid-flight -- the only roundings are the half-up
-	-- product trim (prod word) and the single half-up shift+round at the
-	-- preadder exit (plus the rotator's one exit rounding). Matches the
-	-- Python model's exit_round mode (MixedRadix_PreAdder_FXP).
+	-- data word stored in FIFOs and streamed between stages: s2.16.
+	-- inside the preadder the datapath is wider, rounding happens only at the exits.
 	constant c_fxp_int_width 		 	 : integer := 2;
 	constant c_fxp_frac_width 		 : integer := 16;
 	constant c_fxp_word_width 		 : integer := c_fxp_int_width + c_fxp_frac_width;
 	constant c_guard_bits 				 : integer := 3;
-	-- wide word (preadder adder tree, pre-multiplier): exact for ANY s2.16
-	-- inputs -- tree magnitudes stay below 10 (int 5 = +-16) and the s0
-	-- algorithmic shift (>>1/>>2) needs 2 extra fraction bits (18)
+	-- wide word for the preadder adder tree, exact for any s2.16 input
 	constant c_fxp_int_wide_width  : integer := 5;
 	constant c_fxp_frac_wide_width : integer := 18;
-	-- product word (trimmed coefficient products, t3 adds, output sums):
-	-- products trimmed half-up to 22 fraction bits; sums reach ~22.3 (int 6)
+	-- product word, coefficient products trimmed to 22 fraction bits
 	constant c_fxp_prod_int_width  : integer := 6;
 	constant c_fxp_prod_frac_width : integer := 22;
 	constant c_coeff_int_width 		 : integer := 2;
 	constant c_coeff_frac_width 	 : integer := 16;
 	constant c_twiddle_int_width   : integer := 2;
 	constant c_twiddle_frac_width  : integer := 16;
-	-- Datapath quantization convention, used by every resize/to_sfixed in the
-	-- arithmetic operators, the preadder and the rotator. Must match the
-	-- Python model's rounding (round-to-nearest, see model fxp conventions);
-	-- change both together or bit-exactness breaks. (The twiddle ROM's octant
-	-- negations keep their own saturate/truncate -- exact-code negation, not
-	-- data quantization.)
+	-- rounding mode of the datapath, must match the Python model
 	constant c_fxp_round : fixed_round_style_type := fixed_round;
 
 	-- a stage's supported FFT configs: (radix, stage_FFT_size_N) per config
@@ -49,11 +36,8 @@ package mr_fft_pkg is
 
 	type t_nat_arr is array (natural range <>) of natural;
 
-	-- Supported FFT lengths are N = c_fft_size_base * 2**i * 3**j * 5**k
-	-- <= c_max_fft_size (same predicate as model/decomposition_configs.py).
-	-- Config count, slot count, per-slot capability and per-slot config
-	-- tables (see mr_fft_cfg_pkg) are all derived from these two numbers at
-	-- elaboration time -- nothing else is hand-written.
+	-- supported FFT lengths: N = base * 2^i * 3^j * 5^k <= max.
+	-- everything else (configs, slots, tables) is derived from these two.
 	constant c_fft_size_base : natural := 12;
 	constant c_max_fft_size  : natural := 3300;
 
@@ -61,33 +45,20 @@ package mr_fft_pkg is
 	function f_num_configs return natural;
 	-- supported FFT lengths, ascending; index = config index (i_config_sel)
 	function f_fft_sizes return t_nat_arr;
-	-- final-scaler constants, index-aligned with f_fft_sizes: code =
-	-- round(2**c_scale_frac * 2**total_shift / N), the residual gain that
-	-- turns the chain output X*2**(-total_shift) into the X/N convention.
-	-- Under the FIXED schedule c = (4/3)**#3s * (8/5)**#5s, ranging from 4/3
-	-- up to ~5.7 -- hence the s4.21 format (4 int bits incl sign, +-8). At
-	-- 21 fraction bits the constant's relative error is ~-135 dB, far below
-	-- every measured config (an 18-bit constant would sit ABOVE the best
-	-- ones). The 25-bit code rides the DSP A port; the data word takes the
-	-- 18-bit B port. Round-to-nearest is unambiguous: every supported N has
-	-- a factor 3, so 2**x/N is never an exact half-integer.
+	-- final scaler constants, one per FFT size: round(2**frac * 2**total_shift / N).
+	-- s4.21 fits the 25-bit DSP A port, the data word takes the 18-bit B port.
 	constant c_scale_int  : natural := 4;
 	constant c_scale_frac : natural := 21;
 	function f_fft_scales return t_nat_arr;
-	-- minimal slot counts for the mid-bypass pipeline layout
-	-- (docs/reconfigurable_fft_midbypass_architecture.md section 2):
-	-- radix235 = max(#5s), radix23 = max(#3s+#5s) - radix235,
-	-- radix2 = max(#2s+#3s+#5s) - radix23 - radix235
+	-- slot counts: radix235 = max #5s, radix23 = max(#3s + #5s) - radix235, radix2 = the rest
 	function f_num_r2_slots   return natural;
 	function f_num_r23_slots  return natural;
 	function f_num_r235_slots return natural;
 	function f_num_slots      return natural;
-	-- capability of a pipeline slot (G_CAPABILITY encoding: 0=radix2,
-	-- 1=radix23, 2=radix235); radix2 slots first, then radix23, then radix235
+	-- capability of a slot: 0 radix2, 1 radix23, 2 radix235. radix2 slots come first.
 	function f_slot_capability(slot : natural) return natural;
 	function f_ram_style(depth : natural) return string;
-	-- (radix, size) of every config at one pipeline slot; bypassed configs
-	-- get (radix=>1, size=>1). Use as G_CONFIGS of the stage at that slot.
+	-- (radix, size) of every config at a slot, bypassed configs get (1, 1)
 	function f_slot_configs(slot : natural) return t_config_arr;
 
 	type t_cmplx is record
@@ -125,17 +96,14 @@ package mr_fft_pkg is
 		im : sfixed(c_twiddle_int_width-1 downto -c_twiddle_frac_width);
   end record t_cmplx_twiddle;
 
-	-- Declare arithmetic operator prototypes for t_cmplx so they are
-	-- visible at analysis time to units that `use` this package.
+	-- helper functions and operators
 	function clogb2(n : integer) return integer;
 	function get_max_radix(capability : natural) return natural;
 	function get_delay_cnt(configs : t_config_arr) return natural;
 	function get_max_size(configs : t_config_arr) return natural;
-	-- preadder pipeline depth per capability (0 when not pipelined); the
-	-- stage's valid pipeline and the preadder register cuts both use this
+	-- preadder pipeline depth, 0 when not pipelined
 	function preadder_latency(capability : natural; pipelined : boolean) return natural;
-	-- rotator pipeline depth (0 when combinational); the stage's skid sizing
-	-- and the rotator register cuts both use this
+	-- rotator pipeline depth, 0 when combinational
 	function rotator_latency(pipelined : boolean) return natural;
 	function "+" (left, right : t_cmplx_wide) return t_cmplx_wide;
 	function "-" (left, right : t_cmplx_wide) return t_cmplx_wide;
@@ -188,7 +156,6 @@ package mr_fft_pkg is
 
 end package mr_fft_pkg;
  
--- Mixed Radix FFT Package Body Section
 package body mr_fft_pkg is
 
 	-- ceil(log2(n)), minimum of 1 bit.
@@ -317,7 +284,7 @@ package body mr_fft_pkg is
 			end loop;
 			n2 := n2 * 2;
 		end loop;
-		-- insertion sort ascending: config index = rank of N (model ordering)
+		-- sort ascending, config index = rank of N
 		for i in 1 to sizes'high loop
 			tmp := sizes(i);
 			j   := i;
@@ -410,11 +377,9 @@ package body mr_fft_pkg is
 		end if;
 	end function f_ram_style;
 
-	-- Mid-bypass placement: each config's ascending radix list [2..][3..][5..]
-	-- goes to the earliest slot whose capability admits the radix (2: any
-	-- slot, 3: radix23/radix235, 5: radix235 only); remaining slots are
-	-- bypassed. size at a used slot is the remaining DIF sub-FFT length: the
-	-- product of the radices placed at this and all later slots.
+	-- each config's radices [2..][3..][5..] go to the earliest slot that can take them,
+	-- the rest of the slots are bypassed. size at a slot is the product of the radices
+	-- from this slot to the end.
 	function f_slot_configs(slot : natural) return t_config_arr is
 		constant sizes      : t_nat_arr := f_fft_sizes;
 		constant num_slots  : natural   := f_num_slots;
@@ -449,7 +414,7 @@ package body mr_fft_pkg is
 				radix_at(pos) := 5;
 				pos           := pos + 1;
 			end loop;
-			-- remaining sub-FFT length seen at `slot` (bypass slots contribute 1)
+			-- sub-FFT length at this slot
 			prod := 1;
 			for s in num_slots - 1 downto slot loop
 				prod := prod * radix_at(s);
@@ -497,9 +462,7 @@ package body mr_fft_pkg is
 		return result;
 	end function;
 
-	-- rotator product: full-precision 4-multiplier complex product with ONE
-	-- half-up exit rounding (+half LSB then truncate, wrap) back to the
-	-- memory word -- matches the model's rounding='half_up' rotator quantizer
+	-- rotator product: 4 multipliers, one half-up rounding at the exit
 	function "*" (left : t_cmplx; right : t_cmplx_twiddle) return t_cmplx is
 		variable result 		 : t_cmplx;
 		variable mult_result : t_cmplx_mult;

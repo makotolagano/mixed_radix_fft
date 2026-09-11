@@ -4,37 +4,8 @@ use ieee.numeric_std.all;
 use ieee.fixed_pkg.all;
 
 library work;
--- ---------------------------------------------------------------------------
--- Mixed-radix FFT top: the mid-bypass chain plus an AXI4-Lite configuration
--- interface. Single clock domain (AXI and stream share i_clk).
---
--- Register map (32-bit registers, byte addresses):
---   0x00  ID           RO  x"0FF70100" (FFT core, v1.0)
---   0x04  CTRL         WO  bit0 COMMIT (self-clearing), bit1 CLR_FERR
---   0x08  STATUS       RO  bit0 BUSY (commit pending), bit1 IDLE (in_flight=0),
---                          bit3 FRAMING_ERR (sticky, clear via CTRL.CLR_FERR)
---   0x0C  CONFIG_SEL   RW  SHADOW config select (index into c_fft_sizes)
---   0x10  CONFIG_ACTIVE RO active (committed) config select
---   0x14  IN_FLIGHT    RO  input beats minus output beats inside the chain
---   0x18  FFT_SIZE     RO  N of the ACTIVE config (from c_fft_sizes)
---
--- Configuration protocol (encodes the drained-switch contract in hardware):
--- writes to CONFIG_SEL land in a shadow register only. Writing CTRL.COMMIT
--- gates the input stream (o_ready forced low), waits until the chain is
--- drained (IN_FLIGHT = 0 -- exact, by the chain's beat conservation), then
--- transfers shadow -> active in one cycle and reopens the input. Software:
--- write CONFIG_SEL, write COMMIT, poll STATUS.BUSY = 0 (or just keep
--- streaming: the gate handles the boundary). NOTE: commit only after WHOLE
--- frames have been offered -- a partial frame parks samples in the delay
--- FIFOs and IN_FLIGHT never reaches zero (STATUS makes this visible).
---
--- Frame marker (AXI-Stream tlast semantics): o_last is REGENERATED from a
--- mod-N output beat counter (N of the ACTIVE config), never forwarded from
--- the input -- exact because a commit only lands with the chain drained on a
--- frame boundary. i_last cannot steer the datapath (the delay FIFOs are
--- configured for N), so it is only checked: an accepted beat where i_last
--- disagrees with the input beat counter sets the sticky STATUS.FRAMING_ERR.
--- ---------------------------------------------------------------------------
+-- Active-low reset wrapper around mr_fft_top for the block design.
+-- register map and protocol: see mr_fft_top.
 entity mr_fft_top_wrap is
 	port (
 		i_clk   : in  std_logic;

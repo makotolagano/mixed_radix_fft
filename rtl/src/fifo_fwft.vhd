@@ -2,21 +2,14 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
--- Show-ahead (first-word fall-through) FIFO: o_rd_data always presents the
--- oldest word (flagged by o_rd_valid); i_rd_en pops it. A word written into
--- an empty FIFO reaches o_rd_data one cycle later (plain register semantics).
+-- Show-ahead FIFO: o_rd_data always shows the oldest word, i_rd_en pops it.
+-- a word written into an empty FIFO shows up one cycle later.
 --
--- Structure (oldest -> youngest): head -> mid -> rd_q -> mem.
---   * mem + rd_q form a plain synchronous-read RAM: rd_q is loaded from
---     fifo_mem and from NOTHING else, so Vivado maps it onto a block-RAM
---     primitive's output register (a mux in front of that register would
---     force distributed RAM).
---   * head/mid are two fabric registers providing the show-ahead interface
---     and absorbing the 2-cycle mem->rd_q->head refill latency, so streaming
---     pops run at 1 word/cycle with no bubbles.
---   * writes append at the youngest occupied end; they bypass directly into
---     head/mid only when rd_q and mem are empty (order preserved), which
---     keeps the 1-cycle write-to-head behavior a depth-1 delay line needs.
+-- order oldest -> youngest: head -> mid -> rd_q -> mem.
+-- rd_q is loaded only from fifo_mem so Vivado maps it onto the block RAM
+-- output register. head/mid hide the 2 cycle refill latency so pops run at
+-- one word per cycle. writes go straight into head/mid when nothing older
+-- is behind them, otherwise into the memory.
 entity fifo_fwft is
 	generic (
 		G_DATA_WIDTH : integer := 36;
@@ -65,8 +58,7 @@ architecture rtl of fifo_fwft is
 	attribute ram_style : string;
 	attribute ram_style of fifo_mem : signal is G_RAM_STYLE;
 
-	-- Pointers wrap at G_DEPTH (not necessarily a power of two); mem_cnt is
-	-- the number of words in the memory (head/mid/rd_q are extra capacity).
+	-- pointers wrap at G_DEPTH, mem_cnt counts words in the memory only
 	signal wr_ptr  : unsigned(C_ADDR_W-1 downto 0) := (others => '0');
 	signal rd_ptr  : unsigned(C_ADDR_W-1 downto 0) := (others => '0');
 	signal mem_cnt : unsigned(C_CNT_W-1 downto 0)  := (others => '0');
@@ -79,7 +71,7 @@ architecture rtl of fifo_fwft is
 
 	signal full_s : std_logic;
 
-	-- combinational schedule for this cycle
+	-- schedule for this cycle
 	signal pop         : std_logic;
 	signal head_free   : std_logic;   -- head slot open after this edge
 	signal mid_to_head : std_logic;
@@ -101,22 +93,20 @@ begin
 	rq_to_head  <= rq_v and head_free and not mid_v;
 	rq_to_mid   <= rq_v and not rq_to_head and ((not mid_v) or mid_to_head);
 
-	-- prefetch: keep rd_q loaded whenever the memory holds data and rd_q is
-	-- (or is becoming) free
+	-- prefetch: keep rd_q loaded while the memory has data
 	mem_rd <= '1' when mem_cnt /= 0 and
 	                   (rq_v = '0' or rq_to_head = '1' or rq_to_mid = '1')
 	          else '0';
 
 	tail_empty <= '1' when mem_cnt = 0 and rq_v = '0' else '0';
 
-	-- write routing: bypass into the fabric registers only when no older word
-	-- sits behind them (order), else append into the memory
+	-- writes bypass into the registers only when nothing older is behind them
 	wr_to_head <= i_wr_en and tail_empty and (not mid_v) and head_free;
 	wr_to_mid  <= i_wr_en and tail_empty and not wr_to_head and
 	              ( ((not mid_v) and head_v and not pop) or mid_to_head );
 	wr_to_mem  <= i_wr_en and not wr_to_head and not wr_to_mid and not full_s;
 
-	-- ---- BRAM core: write port + sync-read into the dedicated rd_q ----
+	-- block RAM: write port and sync read into rd_q
 	PROC_MEM: process(i_clk)
 	begin
 		if rising_edge(i_clk) then
@@ -129,7 +119,7 @@ begin
 		end if;
 	end process PROC_MEM;
 
-	-- ---- fabric control: pointers, occupancy, show-ahead registers ----
+	-- pointers, occupancy, show-ahead registers
 	PROC_CTRL: process(i_clk)
 	begin
 		if rising_edge(i_clk) then
